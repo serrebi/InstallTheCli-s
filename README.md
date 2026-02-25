@@ -185,44 +185,7 @@ Build EXE:
 cmd /c build_exe.bat
 ```
 
-## Troubleshooting (Blunt Version)
 
-### "npm runs but package install fails saying `node` is not recognized"
-
-That was a PATH issue inside npm child processes. New builds fix it by forcing the npm directory into subprocess PATH.
-
-If you still see it:
-- reopen the installer
-- confirm Node is actually installed (`node -v`)
-- rerun as Administrator
-
-### Codex fails with `EBUSY` / file locked
-
-Close any running `codex` sessions and retry.
-
-The installer retries and can fall back to an existing install if the binary is locked.
-
-### Linux script throws `$'\\r': command not found`
-
-You moved a Windows CRLF script onto Linux.
-
-Fix:
-```bash
-dos2unix install_all_linux.sh
-```
-
-Or transfer it with `scp` instead of copy/paste.
-
-### Mistral Vibe install issues on Linux (PEP 668)
-
-The installer uses `--break-system-packages` for pip on supported Linux paths. If you still break it manually, that is on your environment, not the script.
-
-## What This Project Does Not Do
-
-- It does not manage your API keys.
-- It does not log you into each CLI.
-- It does not guarantee every third-party package will stay stable forever.
-- It does not hide that it creates background update jobs.
 
 ## Quick Sanity Check After Install
 
