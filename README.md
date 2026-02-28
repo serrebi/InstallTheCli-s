@@ -15,6 +15,8 @@ By default it can install:
 - Grok CLI (`@vibe-kit/grok-cli`)
 - Qwen CLI
 - GitHub Copilot CLI
+- OpenClaw CLI (`openclaw`)
+- IronClaw CLI (`ironclaw`)
 - Mistral Vibe CLI (`mistral-vibe`)
 - Ollama (official version + `ollama` CLI)
 
@@ -198,6 +200,8 @@ gemini
 grok
 qwen
 copilot
+openclaw
+ironclaw
 vibe
 ollama
 ```

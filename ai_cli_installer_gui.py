@@ -115,6 +115,24 @@ CLI_SPECS: tuple[CliSpec, ...] = (
         command_candidates=("copilot", "github-copilot-cli", "github-copilot"),
         shortcut_name="GitHub Copilot CLI",
     ),
+    CliSpec(
+        key="openclaw",
+        label="OpenClaw CLI",
+        help_text="Installs OpenClaw AI CLI from npm (Node 22+ required).",
+        package_candidates=("openclaw",),
+        command_candidates=("openclaw",),
+        shortcut_name="OpenClaw CLI",
+        optional=True,
+    ),
+    CliSpec(
+        key="ironclaw",
+        label="IronClaw CLI",
+        help_text="Installs IronClaw personal AI assistant CLI from npm (Node 22+ required).",
+        package_candidates=("ironclaw",),
+        command_candidates=("ironclaw",),
+        shortcut_name="IronClaw CLI",
+        optional=True,
+    ),
 )
 
 
@@ -1513,7 +1531,7 @@ class InstallerFrame(wx.Frame):
         for spec in CLI_SPECS:
             cb = wx.CheckBox(box, label=spec.label)
             cb.SetName(spec.label)
-            cb.SetValue(True)
+            cb.SetValue(False)
             cb.SetToolTip(spec.help_text)
             box_sizer.Add(cb, 0, wx.ALL, 6)
             self.checkboxes[spec.key] = cb

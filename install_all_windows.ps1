@@ -70,12 +70,14 @@ $NpmFlags = @('--no-fund', '--no-audit', '--no-update-notifier', '--loglevel', '
 $PipFlags = @('--disable-pip-version-check', '--no-input', '--quiet')
 
 $NpmCliSpecs = @{
-    claude  = @{ Label = 'Claude CLI';  Packages = @('@anthropic-ai/claude-code') }
-    codex   = @{ Label = 'Codex CLI';   Packages = @('@openai/codex') }
-    gemini  = @{ Label = 'Gemini CLI';  Packages = @('@google/gemini-cli') }
-    grok    = @{ Label = 'Grok CLI (Vibe Kit)'; Packages = @('@vibe-kit/grok-cli') }
-    qwen    = @{ Label = 'Qwen CLI';    Packages = @('@qwen-code/qwen-code', 'qwen-code') }
-    copilot = @{ Label = 'GitHub Copilot CLI'; Packages = @('@github/copilot', '@githubnext/github-copilot-cli') }
+    claude   = @{ Label = 'Claude CLI';  Packages = @('@anthropic-ai/claude-code') }
+    codex    = @{ Label = 'Codex CLI';   Packages = @('@openai/codex') }
+    gemini   = @{ Label = 'Gemini CLI';  Packages = @('@google/gemini-cli') }
+    grok     = @{ Label = 'Grok CLI (Vibe Kit)'; Packages = @('@vibe-kit/grok-cli') }
+    qwen     = @{ Label = 'Qwen CLI';    Packages = @('@qwen-code/qwen-code', 'qwen-code') }
+    copilot  = @{ Label = 'GitHub Copilot CLI'; Packages = @('@github/copilot', '@githubnext/github-copilot-cli') }
+    openclaw = @{ Label = 'OpenClaw CLI'; Packages = @('openclaw') }
+    ironclaw = @{ Label = 'IronClaw CLI'; Packages = @('ironclaw') }
 }
 
 function Write-Log {
@@ -320,7 +322,9 @@ $NpmPackages = @(
   "@qwen-code/qwen-code",
   "qwen-code",
   "@github/copilot",
-  "@githubnext/github-copilot-cli"
+  "@githubnext/github-copilot-cli",
+  "openclaw",
+  "ironclaw"
 )
 
 function Test-Cmd([string]$Name) { return $null -ne (Get-Command $Name -ErrorAction SilentlyContinue) }
@@ -348,6 +352,8 @@ if ($npmCmd) {
   Update-NpmCli @("@vibe-kit/grok-cli")
   Update-NpmCli @("@qwen-code/qwen-code","qwen-code")
   Update-NpmCli @("@github/copilot","@githubnext/github-copilot-cli")
+  Update-NpmCli @("openclaw")
+  Update-NpmCli @("ironclaw")
 }
 
 if (Test-Cmd "py") {
@@ -392,7 +398,7 @@ function Ensure-HiddenAutoUpdateTask {
 
 function Show-Targets {
     @(
-        'claude', 'codex', 'gemini', 'grok', 'qwen', 'copilot', 'mistral', 'ollama', 'all'
+        'claude', 'codex', 'gemini', 'grok', 'qwen', 'copilot', 'openclaw', 'ironclaw', 'mistral', 'ollama', 'all'
     ) | ForEach-Object { Write-Host $_ }
 }
 
@@ -413,12 +419,14 @@ Commands:
 function Install-Target {
     param([Parameter(Mandatory = $true)][string]$NormalizedTarget)
     switch ($NormalizedTarget) {
-        'claude'  { $npm = Ensure-NodeAndNpm; Install-NpmCliTarget -Key 'claude' -NpmPath $npm }
-        'codex'   { $npm = Ensure-NodeAndNpm; Install-NpmCliTarget -Key 'codex' -NpmPath $npm }
-        'gemini'  { $npm = Ensure-NodeAndNpm; Install-NpmCliTarget -Key 'gemini' -NpmPath $npm }
-        'grok'    { $npm = Ensure-NodeAndNpm; Install-NpmCliTarget -Key 'grok' -NpmPath $npm }
-        'qwen'    { $npm = Ensure-NodeAndNpm; Install-NpmCliTarget -Key 'qwen' -NpmPath $npm }
-        'copilot' { $npm = Ensure-NodeAndNpm; Install-NpmCliTarget -Key 'copilot' -NpmPath $npm }
+        'claude'   { $npm = Ensure-NodeAndNpm; Install-NpmCliTarget -Key 'claude' -NpmPath $npm }
+        'codex'    { $npm = Ensure-NodeAndNpm; Install-NpmCliTarget -Key 'codex' -NpmPath $npm }
+        'gemini'   { $npm = Ensure-NodeAndNpm; Install-NpmCliTarget -Key 'gemini' -NpmPath $npm }
+        'grok'     { $npm = Ensure-NodeAndNpm; Install-NpmCliTarget -Key 'grok' -NpmPath $npm }
+        'qwen'     { $npm = Ensure-NodeAndNpm; Install-NpmCliTarget -Key 'qwen' -NpmPath $npm }
+        'copilot'  { $npm = Ensure-NodeAndNpm; Install-NpmCliTarget -Key 'copilot' -NpmPath $npm }
+        'openclaw' { $npm = Ensure-NodeAndNpm; Install-NpmCliTarget -Key 'openclaw' -NpmPath $npm }
+        'ironclaw' { $npm = Ensure-NodeAndNpm; Install-NpmCliTarget -Key 'ironclaw' -NpmPath $npm }
         'mistral' { Install-MistralVibe }
         'mistral-vibe' { Install-MistralVibe }
         'vibe'    { Install-MistralVibe }
@@ -430,7 +438,7 @@ function Install-Target {
 
 function Install-AllTargets {
     $npm = Ensure-NodeAndNpm
-    foreach ($key in @('claude','codex','gemini','grok','qwen','copilot')) {
+    foreach ($key in @('claude','codex','gemini','grok','qwen','copilot','openclaw','ironclaw')) {
         Install-NpmCliTarget -Key $key -NpmPath $npm
     }
     Install-MistralVibe

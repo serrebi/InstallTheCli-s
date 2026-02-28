@@ -56,7 +56,8 @@ Options:
 
 This script installs:
   - Node.js + npm (distro package manager)
-  - Claude CLI, Codex CLI, Gemini CLI, Grok CLI, Qwen CLI, GitHub Copilot CLI (npm)
+  - Claude CLI, Codex CLI, Gemini CLI, Grok CLI, Qwen CLI, GitHub Copilot CLI,
+    OpenClaw CLI, IronClaw CLI (npm)
   - Mistral Vibe CLI (Python 3.12+ + pip/uv)
   - Ollama (official install script)
   - Cron updater (@reboot and daily) unless --no-cron is used
@@ -72,12 +73,15 @@ Supported targets:
   grok
   qwen
   copilot
+  openclaw
+  ironclaw
   mistral
   ollama
   all
 
 Examples:
   ./install_all_linux.sh install codex
+  ./install_all_linux.sh install openclaw
   ./install_all_linux.sh install mistral --no-cron
   ./install_all_linux.sh install-all --cron-time "15 2 * * *"
   ./install_all_linux.sh setup-cron
@@ -287,7 +291,12 @@ install_npm_cli() {
       log "Installed ${label} using package ${candidate}"
       return 0
     fi
-    warn "npm install failed for ${candidate}; trying next candidate (if any)."
+    warn "npm install failed for ${candidate}; trying with --ignore-scripts fallback."
+    if run_cmd npm "${NPM_FLAGS[@]}" install -g "$candidate" --ignore-scripts; then
+      log "Installed ${label} using package ${candidate} (--ignore-scripts)"
+      return 0
+    fi
+    warn "npm install failed for ${candidate} even with --ignore-scripts; trying next candidate (if any)."
   done
   die "Failed to install ${label} via npm."
 }
@@ -299,6 +308,8 @@ install_all_npm_clis() {
   install_npm_cli "Grok CLI (Vibe Kit)" "@vibe-kit/grok-cli"
   install_npm_cli "Qwen CLI" "@qwen-code/qwen-code" "qwen-code"
   install_npm_cli "GitHub Copilot CLI" "@github/copilot" "@githubnext/github-copilot-cli"
+  install_npm_cli "OpenClaw CLI" "openclaw"
+  install_npm_cli "IronClaw CLI" "ironclaw"
 }
 
 install_npm_target() {
@@ -310,6 +321,8 @@ install_npm_target() {
     grok) install_npm_cli "Grok CLI (Vibe Kit)" "@vibe-kit/grok-cli" ;;
     qwen) install_npm_cli "Qwen CLI" "@qwen-code/qwen-code" "qwen-code" ;;
     copilot) install_npm_cli "GitHub Copilot CLI" "@github/copilot" "@githubnext/github-copilot-cli" ;;
+    openclaw) install_npm_cli "OpenClaw CLI" "openclaw" ;;
+    ironclaw) install_npm_cli "IronClaw CLI" "ironclaw" ;;
     *)
       return 1
       ;;
@@ -371,7 +384,7 @@ install_single_target() {
     ollama)
       install_ollama_official
       ;;
-    claude|codex|gemini|grok|qwen|copilot)
+    claude|codex|gemini|grok|qwen|copilot|openclaw|ironclaw)
       install_npm_target "$target_key"
       ;;
     *)
@@ -437,6 +450,8 @@ update_npm_all() {
   update_npm_cli "Grok CLI (Vibe Kit)" "@vibe-kit/grok-cli"
   update_npm_cli "Qwen CLI" "@qwen-code/qwen-code" "qwen-code"
   update_npm_cli "GitHub Copilot CLI" "@github/copilot" "@githubnext/github-copilot-cli"
+  update_npm_cli "OpenClaw CLI" "openclaw"
+  update_npm_cli "IronClaw CLI" "ironclaw"
 }
 
 select_python() {
@@ -612,7 +627,7 @@ parse_args() {
     help)
       SUBCOMMAND="help"
       ;;
-    claude|codex|gemini|grok|qwen|copilot|mistral|mistral-vibe|vibe|ollama|all)
+    claude|codex|gemini|grok|qwen|copilot|openclaw|ironclaw|mistral|mistral-vibe|vibe|ollama|all)
       # Convenience alias: treat first positional target as "install <target>"
       SUBCOMMAND="install"
       TARGET="${positional[0],,}"
@@ -681,7 +696,7 @@ main() {
   if [[ "$SUBCOMMAND" == "setup-cron" ]]; then
     log "Cron updater is configured."
   else
-    log "Open a new shell and run: claude, codex, gemini, grok, qwen, copilot, vibe, ollama"
+    log "Open a new shell and run: claude, codex, gemini, grok, qwen, copilot, openclaw, ironclaw, vibe, ollama"
   fi
 }
 
