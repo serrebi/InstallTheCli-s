@@ -1657,6 +1657,20 @@ def create_linux_desktop_shortcut(
     os.chmod(shortcut_path, 0o755)
 
 
+def update_desktop_database_for_user(log: Callable[[str], None]) -> None:
+    apps_dir = os.path.join(os.path.expanduser("~"), ".local", "share", "applications")
+    if shutil.which("update-desktop-database"):
+        try:
+            subprocess.run(
+                ["update-desktop-database", apps_dir],
+                capture_output=True,
+                **subprocess_creationflags_kwargs(),
+            )
+            log("Updated desktop application database.")
+        except OSError:
+            pass
+
+
 def create_cli_desktop_shortcut(
     spec: CliSpec,
     command_path: str,
@@ -1667,6 +1681,11 @@ def create_cli_desktop_shortcut(
         shortcut_path = os.path.join(desktop, f"{spec.shortcut_name}.desktop")
         create_linux_desktop_shortcut(shortcut_path, command_path, spec.shortcut_name)
         log(f"Created desktop shortcut: {shortcut_path}")
+        # Also install to XDG applications dir so the app appears in the system menu.
+        apps_dir = os.path.join(os.path.expanduser("~"), ".local", "share", "applications")
+        menu_path = os.path.join(apps_dir, f"installcli-{spec.key}.desktop")
+        create_linux_desktop_shortcut(menu_path, command_path, spec.shortcut_name)
+        log(f"Created menu entry: {menu_path}")
         return shortcut_path
 
     shortcut_path = os.path.join(desktop, f"{spec.shortcut_name}.lnk")
@@ -1956,13 +1975,18 @@ class InstallerFrame(wx.Frame):
 
     def _run_gui_apps_install(self, selected_apps: list[GuiAppSpec]) -> None:
         total = len(selected_apps)
+        any_installed = False
         for index, app_spec in enumerate(selected_apps, start=1):
             pct = int((index - 1) / max(total, 1) * 80) + 10
             self.set_gauge(pct)
             self.set_status(f"Installing {app_spec.label} ({index}/{total})")
             success = install_gui_app(app_spec, self.log)
-            if not success:
+            if success:
+                any_installed = True
+            else:
                 self.log(f"Warning: Could not install {app_spec.label}.")
+        if is_linux() and any_installed:
+            update_desktop_database_for_user(self.log)
 
     def _run_install(self, selected: list[CliSpec], enable_auto_update: bool = True) -> None:
         self.log(("Windows 11 AI CLI Installer started." if is_windows() else "Linux AI CLI Installer started."))
@@ -2104,6 +2128,8 @@ class InstallerFrame(wx.Frame):
                 create_cli_desktop_shortcut(spec, cmd_path, self.log)
             except Exception as exc:
                 self.log(f"Shortcut creation failed for {spec.label}: {exc}")
+        if is_linux() and installed_commands:
+            update_desktop_database_for_user(self.log)
 
         self.set_status("Finalizing")
         self.set_gauge(98)
