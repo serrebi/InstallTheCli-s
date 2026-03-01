@@ -1641,19 +1641,25 @@ def create_linux_desktop_shortcut(
     shortcut_path: str,
     command_path: str,
     terminal_title: str,
+    comment: str = "",
+    icon: str = "utilities-terminal",
 ) -> None:
     os.makedirs(os.path.dirname(shortcut_path), exist_ok=True)
-    content = "\n".join(
-        [
-            "[Desktop Entry]",
-            "Type=Application",
-            f"Name={terminal_title}",
-            f"Exec={command_path}",
-            "Terminal=true",
-            "Categories=Development;",
-        ]
-    ) + "\n"
-    write_text_file(shortcut_path, content)
+    lines = [
+        "[Desktop Entry]",
+        "Type=Application",
+        f"Name={terminal_title}",
+    ]
+    if comment:
+        lines.append(f"Comment={comment}")
+    lines += [
+        f"Exec={command_path}",
+        f"Icon={icon}",
+        "Terminal=true",
+        "Categories=Development;",
+        "StartupNotify=false",
+    ]
+    write_text_file(shortcut_path, "\n".join(lines) + "\n")
     os.chmod(shortcut_path, 0o755)
 
 
@@ -1679,12 +1685,12 @@ def create_cli_desktop_shortcut(
     desktop = find_desktop_directory()
     if not is_windows():
         shortcut_path = os.path.join(desktop, f"{spec.shortcut_name}.desktop")
-        create_linux_desktop_shortcut(shortcut_path, command_path, spec.shortcut_name)
+        create_linux_desktop_shortcut(shortcut_path, command_path, spec.shortcut_name, comment=spec.help_text)
         log(f"Created desktop shortcut: {shortcut_path}")
         # Also install to XDG applications dir so the app appears in the system menu.
         apps_dir = os.path.join(os.path.expanduser("~"), ".local", "share", "applications")
         menu_path = os.path.join(apps_dir, f"installcli-{spec.key}.desktop")
-        create_linux_desktop_shortcut(menu_path, command_path, spec.shortcut_name)
+        create_linux_desktop_shortcut(menu_path, command_path, spec.shortcut_name, comment=spec.help_text)
         log(f"Created menu entry: {menu_path}")
         return shortcut_path
 
