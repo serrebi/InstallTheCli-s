@@ -59,6 +59,7 @@ class GuiAppSpec:
     winget_id: Optional[str] = None
     flatpak_id: Optional[str] = None
     snap_name: Optional[str] = None
+    linux_browser_url: Optional[str] = None
     optional: bool = False
 
 
@@ -161,9 +162,9 @@ GUI_APP_SPECS: tuple[GuiAppSpec, ...] = (
     GuiAppSpec(
         key="chatgpt_app",
         label="ChatGPT App (Desktop)",
-        help_text="Installs OpenAI ChatGPT consumer desktop app (Windows: winget; Linux: Snap).",
+        help_text="Installs OpenAI ChatGPT consumer desktop app (Windows: winget; Linux: browser shortcut to chat.openai.com).",
         winget_id="OpenAI.ChatGPT",
-        snap_name="chatgpt",
+        linux_browser_url="https://chat.openai.com",
     ),
     GuiAppSpec(
         key="gemini_app",
@@ -176,8 +177,9 @@ GUI_APP_SPECS: tuple[GuiAppSpec, ...] = (
     GuiAppSpec(
         key="copilot_app",
         label="Microsoft Copilot App (Desktop)",
-        help_text="Installs Microsoft Copilot consumer desktop app (Windows: winget; Linux: not officially available).",
+        help_text="Installs Microsoft Copilot consumer desktop app (Windows: winget; Linux: browser shortcut to copilot.microsoft.com).",
         winget_id="Microsoft.Copilot",
+        linux_browser_url="https://copilot.microsoft.com",
         optional=True,
     ),
     GuiAppSpec(
@@ -1559,6 +1561,35 @@ def _install_gui_app_winget(spec: GuiAppSpec, log: Callable[[str], None]) -> boo
     return True
 
 
+def _install_gui_app_browser_shortcut(spec: GuiAppSpec, log: Callable[[str], None]) -> bool:
+    """Create a .desktop shortcut that opens the app's web URL in the default browser."""
+    if not spec.linux_browser_url:
+        return False
+    apps_dir = os.path.join(os.path.expanduser("~"), ".local", "share", "applications")
+    os.makedirs(apps_dir, exist_ok=True)
+    desktop_path = os.path.join(apps_dir, f"installcli-{spec.key}.desktop")
+    lines = [
+        "[Desktop Entry]",
+        "Type=Application",
+        f"Name={spec.label}",
+        f"Comment={spec.help_text}",
+        f"Exec=xdg-open {spec.linux_browser_url}",
+        "Icon=applications-internet",
+        "Categories=Network;",
+        "StartupNotify=false",
+    ]
+    write_text_file(desktop_path, "\n".join(lines) + "\n")
+    os.chmod(desktop_path, 0o755)
+    log(f"Created browser shortcut for {spec.label} → {spec.linux_browser_url}")
+    desktop_dir = find_desktop_directory()
+    if desktop_dir:
+        desktop_shortcut = os.path.join(desktop_dir, f"{spec.label}.desktop")
+        write_text_file(desktop_shortcut, "\n".join(lines) + "\n")
+        os.chmod(desktop_shortcut, 0o755)
+        log(f"Created desktop shortcut: {desktop_shortcut}")
+    return True
+
+
 def install_gui_app(spec: GuiAppSpec, log: Callable[[str], None]) -> bool:
     if is_windows():
         return _install_gui_app_winget(spec, log)
@@ -1567,8 +1598,9 @@ def install_gui_app(spec: GuiAppSpec, log: Callable[[str], None]) -> bool:
             return True
         if spec.snap_name and _install_gui_app_snap(spec, log):
             return True
-        if not spec.flatpak_id and not spec.snap_name:
-            log(f"{spec.label}: No Linux install method available. Please install it manually from the app's website.")
+        if spec.linux_browser_url and _install_gui_app_browser_shortcut(spec, log):
+            return True
+        log(f"{spec.label}: No Linux install method available. Please install it manually from the app's website.")
         return False
     log(f"{spec.label}: Unsupported platform.")
     return False
@@ -1637,6 +1669,22 @@ def resolve_command_path(
     return None
 
 
+def find_linux_terminal_emulator() -> Optional[str]:
+    """Return an Exec-ready prefix for launching a command in a terminal window."""
+    candidates = [
+        ("ptyxis", "ptyxis -- {cmd}"),
+        ("kgx", "kgx -- {cmd}"),
+        ("gnome-terminal", "gnome-terminal -- {cmd}"),
+        ("xfce4-terminal", "xfce4-terminal -x {cmd}"),
+        ("konsole", "konsole -e {cmd}"),
+        ("xterm", "xterm -e {cmd}"),
+    ]
+    for binary, template in candidates:
+        if shutil.which(binary):
+            return template
+    return None
+
+
 def create_linux_desktop_shortcut(
     shortcut_path: str,
     command_path: str,
@@ -1645,6 +1693,13 @@ def create_linux_desktop_shortcut(
     icon: str = "utilities-terminal",
 ) -> None:
     os.makedirs(os.path.dirname(shortcut_path), exist_ok=True)
+    terminal_template = find_linux_terminal_emulator()
+    if terminal_template:
+        exec_value = terminal_template.format(cmd=command_path)
+        use_terminal_flag = False
+    else:
+        exec_value = command_path
+        use_terminal_flag = True
     lines = [
         "[Desktop Entry]",
         "Type=Application",
@@ -1653,9 +1708,12 @@ def create_linux_desktop_shortcut(
     if comment:
         lines.append(f"Comment={comment}")
     lines += [
-        f"Exec={command_path}",
+        f"Exec={exec_value}",
         f"Icon={icon}",
-        "Terminal=true",
+    ]
+    if use_terminal_flag:
+        lines.append("Terminal=true")
+    lines += [
         "Categories=Development;",
         "StartupNotify=false",
     ]
@@ -1673,6 +1731,20 @@ def update_desktop_database_for_user(log: Callable[[str], None]) -> None:
                 **subprocess_creationflags_kwargs(),
             )
             log("Updated desktop application database.")
+        except OSError:
+            pass
+    # Reset GNOME Shell's cached app-picker layout so new apps appear in the grid.
+    # GNOME Shell keeps a hardcoded layout in dconf; new .desktop files are invisible
+    # until this is cleared and the shell regenerates it (happens at next login or
+    # when the app grid is first opened after the reset).
+    if shutil.which("gsettings"):
+        try:
+            subprocess.run(
+                ["gsettings", "set", "org.gnome.shell", "app-picker-layout", "[]"],
+                capture_output=True,
+                **subprocess_creationflags_kwargs(),
+            )
+            log("Cleared GNOME app grid cache — new shortcuts will appear after re-opening the app grid or logging out and back in.")
         except OSError:
             pass
 

@@ -627,7 +627,10 @@ class RegistryAndWindowsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=".") as tmp_dir:
             path = os.path.join(tmp_dir, "Desktop", "Codex CLI.desktop")
             chmod_mock = MagicMock()
-            with patch.object(m.os, "chmod", chmod_mock):
+            with (
+                patch.object(m.os, "chmod", chmod_mock),
+                patch.object(m, "find_linux_terminal_emulator", return_value=None),
+            ):
                 m.create_linux_desktop_shortcut(path, "/usr/local/bin/codex", "Codex CLI")
 
             self.assertTrue(os.path.isfile(path))
@@ -637,6 +640,21 @@ class RegistryAndWindowsTests(unittest.TestCase):
             self.assertIn("Exec=/usr/local/bin/codex", content)
             self.assertIn("Terminal=true", content)
             chmod_mock.assert_called_once_with(path, 0o755)
+
+    def test_create_linux_desktop_shortcut_uses_terminal_emulator_when_available(self) -> None:
+        with tempfile.TemporaryDirectory(dir=".") as tmp_dir:
+            path = os.path.join(tmp_dir, "Desktop", "Codex CLI.desktop")
+            chmod_mock = MagicMock()
+            with (
+                patch.object(m.os, "chmod", chmod_mock),
+                patch.object(m, "find_linux_terminal_emulator", return_value="ptyxis -- {cmd}"),
+            ):
+                m.create_linux_desktop_shortcut(path, "/usr/local/bin/codex", "Codex CLI")
+
+            with open(path, "r", encoding="utf-8") as f:
+                content = f.read()
+            self.assertIn("Exec=ptyxis -- /usr/local/bin/codex", content)
+            self.assertNotIn("Terminal=true", content)
 
     def test_create_cli_desktop_shortcut_linux_writes_desktop_file(self) -> None:
         spec = next(spec for spec in m.CLI_SPECS if spec.key == "ollama")
