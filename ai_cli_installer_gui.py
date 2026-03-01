@@ -1,9 +1,12 @@
 import ctypes
 import glob
 import os
+import shlex
 import shutil
+import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -45,6 +48,17 @@ class CliSpec:
     package_candidates: tuple[str, ...]
     command_candidates: tuple[str, ...]
     shortcut_name: str
+    optional: bool = False
+
+
+@dataclass(frozen=True)
+class GuiAppSpec:
+    key: str
+    label: str
+    help_text: str
+    winget_id: Optional[str] = None
+    flatpak_id: Optional[str] = None
+    snap_name: Optional[str] = None
     optional: bool = False
 
 
@@ -131,6 +145,47 @@ CLI_SPECS: tuple[CliSpec, ...] = (
         package_candidates=("ironclaw",),
         command_candidates=("ironclaw",),
         shortcut_name="IronClaw CLI",
+        optional=True,
+    ),
+)
+
+
+GUI_APP_SPECS: tuple[GuiAppSpec, ...] = (
+    GuiAppSpec(
+        key="claude_app",
+        label="Claude App (Desktop)",
+        help_text="Installs Anthropic Claude consumer desktop app (Windows: winget; Linux: Flatpak from Flathub).",
+        winget_id="Anthropic.Claude",
+        flatpak_id="ai.anthropic.Claude",
+    ),
+    GuiAppSpec(
+        key="chatgpt_app",
+        label="ChatGPT App (Desktop)",
+        help_text="Installs OpenAI ChatGPT consumer desktop app (Windows: winget; Linux: Snap).",
+        winget_id="OpenAI.ChatGPT",
+        snap_name="chatgpt",
+    ),
+    GuiAppSpec(
+        key="gemini_app",
+        label="Gemini App (Desktop)",
+        help_text="Installs Google Gemini consumer desktop app (Windows: winget; Linux: Flatpak from Flathub).",
+        winget_id="Google.Gemini",
+        flatpak_id="com.google.Gemini",
+        optional=True,
+    ),
+    GuiAppSpec(
+        key="copilot_app",
+        label="Microsoft Copilot App (Desktop)",
+        help_text="Installs Microsoft Copilot consumer desktop app (Windows: winget; Linux: not officially available).",
+        winget_id="Microsoft.Copilot",
+        optional=True,
+    ),
+    GuiAppSpec(
+        key="perplexity_app",
+        label="Perplexity App (Desktop)",
+        help_text="Installs Perplexity AI consumer desktop app (Windows: winget; Linux: Flatpak from Flathub).",
+        winget_id="PerplexityAI.Perplexity",
+        flatpak_id="ai.perplexity.Perplexity",
         optional=True,
     ),
 )
@@ -1333,6 +1388,40 @@ def try_install_mistral_vibe(
     return (False, err)
 
 
+def _linux_sudo() -> list[str]:
+    return [] if is_admin() else ["sudo", "-A"]
+
+
+def _sudo_needs_password() -> bool:
+    """Return True if sudo requires a password (no cached credential)."""
+    try:
+        result = subprocess.run(
+            ["sudo", "-n", "true"],
+            capture_output=True,
+            **subprocess_creationflags_kwargs(),
+        )
+        return result.returncode != 0
+    except OSError:
+        return True
+
+
+def _create_sudo_askpass_script(password: str) -> str:
+    """Write a temporary askpass helper script and return its path."""
+    fd, path = tempfile.mkstemp(prefix="itc_askpass_", suffix=".sh")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write("#!/bin/sh\n")
+            f.write(f"printf '%s\\n' {shlex.quote(password)}\n")
+        os.chmod(path, stat.S_IRWXU)
+    except Exception:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        raise
+    return path
+
+
 def npm_install_global(
     npm_exe: str,
     package_name: str,
@@ -1343,7 +1432,8 @@ def npm_install_global(
     if npm_dir:
         env["PATH"] = npm_dir + os.pathsep + env.get("PATH", "")
     env["npm_config_update_notifier"] = "false"
-    return run_command([npm_exe, *NPM_QUIET_FLAGS, "install", "-g", package_name], log, env=env)
+    sudo = _linux_sudo() if is_linux() else []
+    return run_command([*sudo, npm_exe, *NPM_QUIET_FLAGS, "install", "-g", package_name], log, env=env)
 
 
 def is_probably_windows_errno_exit_code(code: int) -> bool:
@@ -1367,6 +1457,121 @@ def is_probably_windows_file_lock_error(detail: Optional[str]) -> bool:
         or "windows errno -4082" in lowered
         or "4294963214" in lowered
     )
+
+
+def _ensure_flatpak_flathub(log: Callable[[str], None]) -> bool:
+    if not shutil.which("flatpak"):
+        return False
+    try:
+        result = subprocess.run(
+            ["flatpak", "remotes"],
+            capture_output=True,
+            text=True,
+            **subprocess_creationflags_kwargs(),
+        )
+        if "flathub" in (result.stdout or "").lower():
+            return True
+    except OSError:
+        pass
+    log("Adding Flathub remote (system-wide)...")
+    code = run_command(
+        [
+            *_linux_sudo(), "flatpak", "remote-add", "--if-not-exists",
+            "flathub", "https://dl.flathub.org/repo/flathub.flatpakrepo",
+        ],
+        log,
+    )
+    return code == 0
+
+
+def _install_gui_app_flatpak(spec: GuiAppSpec, log: Callable[[str], None]) -> bool:
+    if not spec.flatpak_id:
+        return False
+    if not _ensure_flatpak_flathub(log):
+        log(f"{spec.label}: flatpak/Flathub not available.")
+        return False
+    log(f"Installing {spec.label} via Flatpak ({spec.flatpak_id})...")
+    code = run_command(
+        [*_linux_sudo(), "flatpak", "install", "flathub", spec.flatpak_id, "-y", "--noninteractive"],
+        log,
+    )
+    if code == 0:
+        log(f"Successfully installed {spec.label} via Flatpak.")
+        return True
+    log(f"Flatpak install returned exit code {format_exit_code(code)}; trying update...")
+    code = run_command(
+        [*_linux_sudo(), "flatpak", "update", spec.flatpak_id, "-y", "--noninteractive"],
+        log,
+    )
+    if code == 0:
+        log(f"Successfully updated {spec.label} via Flatpak.")
+        return True
+    log(f"Flatpak install/update failed with exit code {format_exit_code(code)}.")
+    return False
+
+
+def _install_gui_app_snap(spec: GuiAppSpec, log: Callable[[str], None]) -> bool:
+    if not spec.snap_name:
+        return False
+    if not shutil.which("snap"):
+        log(f"{spec.label}: snap is not available.")
+        return False
+    log(f"Installing {spec.label} via Snap ({spec.snap_name})...")
+    code = run_command([*_linux_sudo(), "snap", "install", spec.snap_name], log)
+    if code == 0:
+        log(f"Successfully installed {spec.label} via Snap.")
+        return True
+    log(f"Snap install failed with exit code {format_exit_code(code)}.")
+    return False
+
+
+def _install_gui_app_winget(spec: GuiAppSpec, log: Callable[[str], None]) -> bool:
+    if not spec.winget_id:
+        log(f"{spec.label}: No winget ID configured for Windows. Skipping.")
+        return False
+    winget = find_winget()
+    if not winget:
+        log(f"{spec.label}: winget was not found. Cannot install.")
+        return False
+    log(f"Installing {spec.label} via winget ({spec.winget_id})...")
+    code = run_command(
+        [
+            winget, "install", "--id", spec.winget_id, "-e",
+            "--accept-package-agreements", "--accept-source-agreements",
+            "--silent", "--disable-interactivity",
+        ],
+        log,
+    )
+    if code != 0:
+        log(f"winget install returned exit code {format_exit_code(code)}; trying upgrade...")
+        code = run_command(
+            [
+                winget, "upgrade", "--id", spec.winget_id, "-e",
+                "--accept-package-agreements", "--accept-source-agreements",
+                "--silent", "--disable-interactivity",
+            ],
+            log,
+        )
+        if code != 0:
+            log(f"{spec.label} install/upgrade failed with exit code {format_exit_code(code)}.")
+            return False
+    log(f"Successfully installed/updated {spec.label}.")
+    return True
+
+
+def install_gui_app(spec: GuiAppSpec, log: Callable[[str], None]) -> bool:
+    if is_windows():
+        return _install_gui_app_winget(spec, log)
+    if is_linux():
+        if spec.flatpak_id and _install_gui_app_flatpak(spec, log):
+            return True
+        if spec.snap_name and _install_gui_app_snap(spec, log):
+            return True
+        if not spec.flatpak_id and not spec.snap_name:
+            log(f"{spec.label}: No Linux install method available. Please install it manually from the app's website.")
+        return False
+    log(f"{spec.label}: Unsupported platform.")
+    return False
 
 
 def try_install_package_candidates(
@@ -1483,7 +1688,7 @@ def create_cli_desktop_shortcut(
 class InstallerFrame(wx.Frame):
     def __init__(self) -> None:  # pragma: no cover
         platform_label = "Windows 11" if is_windows() else "Linux"
-        super().__init__(None, title=f"AI CLI Installer ({platform_label})", size=(920, 680))
+        super().__init__(None, title=f"AI CLI Installer ({platform_label})", size=(920, 820))
         self.worker_thread: Optional[threading.Thread] = None
         self._persistent_log_path: Optional[str] = None
         self._persistent_log_write_warning_shown = False
@@ -1537,6 +1742,20 @@ class InstallerFrame(wx.Frame):
             self.checkboxes[spec.key] = cb
 
         root.Add(box_sizer, 0, wx.LEFT | wx.RIGHT | wx.EXPAND | wx.BOTTOM, 12)
+
+        app_box = wx.StaticBox(panel, label="Select AI desktop apps to install (Windows: winget; Linux: Flatpak/Snap)")
+        app_box_sizer = wx.StaticBoxSizer(app_box, wx.VERTICAL)
+
+        self.gui_app_checkboxes: dict[str, wx.CheckBox] = {}
+        for app_spec in GUI_APP_SPECS:
+            cb = wx.CheckBox(app_box, label=app_spec.label)
+            cb.SetName(app_spec.label)
+            cb.SetValue(False)
+            cb.SetToolTip(app_spec.help_text)
+            app_box_sizer.Add(cb, 0, wx.ALL, 6)
+            self.gui_app_checkboxes[app_spec.key] = cb
+
+        root.Add(app_box_sizer, 0, wx.LEFT | wx.RIGHT | wx.EXPAND | wx.BOTTOM, 12)
 
         self.auto_update_checkbox = wx.CheckBox(
             panel,
@@ -1626,9 +1845,13 @@ class InstallerFrame(wx.Frame):
     def on_select_all(self, _event: wx.CommandEvent) -> None:
         for cb in self.checkboxes.values():
             cb.SetValue(True)
+        for cb in self.gui_app_checkboxes.values():
+            cb.SetValue(True)
 
     def on_select_none(self, _event: wx.CommandEvent) -> None:
         for cb in self.checkboxes.values():
+            cb.SetValue(False)
+        for cb in self.gui_app_checkboxes.values():
             cb.SetValue(False)
 
     def on_close(self, _event: wx.CommandEvent) -> None:
@@ -1647,14 +1870,32 @@ class InstallerFrame(wx.Frame):
             return
 
         selected = [spec for spec in CLI_SPECS if self.checkboxes[spec.key].GetValue()]
-        if not selected:
+        selected_apps = [spec for spec in GUI_APP_SPECS if self.gui_app_checkboxes[spec.key].GetValue()]
+        if not selected and not selected_apps:
             wx.MessageBox(
-                "Select at least one CLI to install.",
+                "Select at least one CLI or desktop app to install.",
                 "Nothing Selected",
                 wx.OK | wx.ICON_WARNING,
                 self,
             )
             return
+
+        self._askpass_script: Optional[str] = None
+        if is_linux() and not is_admin() and _sudo_needs_password():
+            password = self._prompt_sudo_password()
+            if not password:
+                return
+            try:
+                self._askpass_script = _create_sudo_askpass_script(password)
+                os.environ["SUDO_ASKPASS"] = self._askpass_script
+            except Exception as exc:
+                wx.MessageBox(
+                    f"Failed to set up sudo authentication: {exc}",
+                    "Error",
+                    wx.OK | wx.ICON_ERROR,
+                    self,
+                )
+                return
 
         self.log_ctrl.Clear()
         reset_log = getattr(self, "_reset_persistent_log_for_new_run", None)
@@ -1670,14 +1911,38 @@ class InstallerFrame(wx.Frame):
 
         self.worker_thread = threading.Thread(
             target=self._install_worker,
-            args=(selected, auto_update_enabled),
+            args=(selected, selected_apps, auto_update_enabled),
             daemon=True,
         )
         self.worker_thread.start()
 
-    def _install_worker(self, selected: list[CliSpec], enable_auto_update: bool = True) -> None:
+    def _prompt_sudo_password(self) -> Optional[str]:  # pragma: no cover
+        dlg = wx.PasswordEntryDialog(
+            self,
+            "Enter your sudo password to install packages as root:",
+            "Sudo Password Required",
+        )
+        result = dlg.ShowModal()
+        value = dlg.GetValue() if result == wx.ID_OK else None
+        dlg.Destroy()
+        return value
+
+    def _cleanup_askpass(self) -> None:
+        script = getattr(self, "_askpass_script", None)
+        if script:
+            try:
+                os.unlink(script)
+            except OSError:
+                pass
+            self._askpass_script = None
+        os.environ.pop("SUDO_ASKPASS", None)
+
+    def _install_worker(self, selected: list[CliSpec], selected_apps: list[GuiAppSpec], enable_auto_update: bool = True) -> None:
         try:
-            self._run_install(selected, enable_auto_update)
+            if selected:
+                self._run_install(selected, enable_auto_update)
+            if selected_apps:
+                self._run_gui_apps_install(selected_apps)
             self.log("Installation workflow complete.")
             self.set_status("Complete")
             self.set_gauge(100)
@@ -1687,6 +1952,17 @@ class InstallerFrame(wx.Frame):
             self.set_status("Failed")
         finally:
             self.set_busy(False)
+            self._cleanup_askpass()
+
+    def _run_gui_apps_install(self, selected_apps: list[GuiAppSpec]) -> None:
+        total = len(selected_apps)
+        for index, app_spec in enumerate(selected_apps, start=1):
+            pct = int((index - 1) / max(total, 1) * 80) + 10
+            self.set_gauge(pct)
+            self.set_status(f"Installing {app_spec.label} ({index}/{total})")
+            success = install_gui_app(app_spec, self.log)
+            if not success:
+                self.log(f"Warning: Could not install {app_spec.label}.")
 
     def _run_install(self, selected: list[CliSpec], enable_auto_update: bool = True) -> None:
         self.log(("Windows 11 AI CLI Installer started." if is_windows() else "Linux AI CLI Installer started."))
