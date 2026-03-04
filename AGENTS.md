@@ -96,6 +96,10 @@ If you change platform-specific behavior:
   - `./install_all_linux.sh list`
   - `./install_all_linux.sh install codex --dry-run --no-cron`
 
+## Build Quality
+
+Always fix any warnings, bugs, or errors that appear during a build before shipping. If the build produces warnings or errors that you can resolve, fix them immediately and rebuild to confirm they are gone.
+
 ## Editing Guidance
 
 - Prefer small, targeted patches.
