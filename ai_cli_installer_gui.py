@@ -57,8 +57,10 @@ class GuiAppSpec:
     label: str
     help_text: str
     winget_id: Optional[str] = None
+    winget_source: Optional[str] = None
     flatpak_id: Optional[str] = None
     snap_name: Optional[str] = None
+    windows_browser_url: Optional[str] = None
     linux_browser_url: Optional[str] = None
     optional: bool = False
 
@@ -165,6 +167,14 @@ GUI_APP_SPECS: tuple[GuiAppSpec, ...] = (
         help_text="Installs OpenAI ChatGPT consumer desktop app (Windows: winget; Linux: browser shortcut to chat.openai.com).",
         winget_id="OpenAI.ChatGPT",
         linux_browser_url="https://chat.openai.com",
+    ),
+    GuiAppSpec(
+        key="codex_app",
+        label="Codex App (Desktop)",
+        help_text="Installs Codex desktop app from Microsoft Store (Product ID: 9PLM9XGG6VKS).",
+        winget_id="9PLM9XGG6VKS",
+        winget_source="msstore",
+        optional=True,
     ),
     GuiAppSpec(
         key="gemini_app",
@@ -603,6 +613,29 @@ def ensure_cli_auto_update_task(
         + ")."
     )
     return merged_packages
+
+
+def remove_cli_auto_update_packages(
+    package_names: list[str],
+    log: Callable[[str], None],
+) -> list[str]:
+    if not is_windows():
+        return []
+    to_remove = {p.strip() for p in package_names if p and p.strip()}
+    if not to_remove:
+        return []
+    packages_file = os.path.join(get_app_support_directory(), AUTO_UPDATE_PACKAGES_FILE)
+    existing = read_nonempty_lines(packages_file)
+    if not existing:
+        return []
+    kept = [pkg for pkg in existing if pkg not in to_remove]
+    if kept == existing:
+        return existing
+    try:
+        write_nonempty_lines(packages_file, kept)
+    except OSError as exc:
+        log(f"Warning: unable to update auto-update package list after uninstall: {exc}")
+    return kept
 
 
 def create_windows_shortcut(
@@ -1390,6 +1423,151 @@ def try_install_mistral_vibe(
     return (False, err)
 
 
+def _find_python_for_mistral_uninstall() -> Optional[list[str]]:
+    if is_linux():
+        found = find_linux_python_for_mistral()
+        if found:
+            return found
+        for candidate in ("python3", "python"):
+            exe = shutil.which(candidate)
+            if exe:
+                return [exe]
+        return None
+
+    found = find_python_314_command()
+    if found:
+        return found
+    for candidate in ("python.exe", "python"):
+        exe = shutil.which(candidate)
+        if exe:
+            return [exe]
+    return None
+
+
+def try_uninstall_mistral_vibe(
+    spec: CliSpec,
+    log: Callable[[str], None],
+) -> tuple[bool, Optional[str]]:
+    package_name = spec.package_candidates[0] if spec.package_candidates else "mistral-vibe"
+    uv_ok = False
+    pip_ok = False
+
+    uv_exe = find_uv()
+    if uv_exe:
+        log(f"Trying Mistral Vibe uninstall via uv: {package_name}")
+        code = run_command([uv_exe, "tool", "uninstall", package_name], log)
+        if code == 0:
+            uv_ok = True
+        else:
+            log(f"uv tool uninstall failed with exit code {format_exit_code(code)}")
+    else:
+        log("uv was not found for Mistral Vibe uninstall; trying pip fallback.")
+
+    python_cmd = _find_python_for_mistral_uninstall()
+    if python_cmd:
+        python_label = " ".join(python_cmd)
+        log(f"Trying Mistral Vibe uninstall via pip using: {python_label}")
+        code = run_command(
+            [
+                *python_cmd,
+                "-m",
+                "pip",
+                "uninstall",
+                "--yes",
+                *pip_install_flags_for_platform(),
+                package_name,
+            ],
+            log,
+        )
+        if code == 0:
+            pip_ok = True
+        else:
+            log(f"pip uninstall failed with exit code {format_exit_code(code)}")
+    else:
+        log("Python interpreter not found for Mistral Vibe pip uninstall fallback.")
+
+    if uv_ok or pip_ok:
+        return (True, package_name)
+
+    command_path = resolve_command_path(
+        spec.command_candidates,
+        dedupe_preserve_order(get_python_cli_bin_dirs(log) + get_cli_bin_dirs(find_npm(), log)),
+    )
+    if not command_path:
+        log("Mistral Vibe command was not found; treating as already uninstalled.")
+        return (True, package_name)
+
+    err = "Mistral Vibe uninstall failed and command is still present."
+    log(err)
+    return (False, err)
+
+
+def try_uninstall_ollama(log: Callable[[str], None]) -> tuple[bool, Optional[str]]:
+    package_name = OLLAMA_WINGET_ID
+
+    existing_before = find_ollama()
+    if not existing_before:
+        log("Ollama CLI was not detected; nothing to uninstall.")
+        return (True, package_name)
+
+    if is_linux():
+        linux_steps: list[list[str]] = []
+        if shutil.which("systemctl"):
+            linux_steps.extend(
+                [
+                    [*_linux_sudo(), "systemctl", "stop", "ollama"],
+                    [*_linux_sudo(), "systemctl", "disable", "ollama"],
+                    [*_linux_sudo(), "rm", "-f", "/etc/systemd/system/ollama.service"],
+                    [*_linux_sudo(), "systemctl", "daemon-reload"],
+                ]
+            )
+        linux_steps.extend(
+            [
+                [*_linux_sudo(), "rm", "-f", "/usr/local/bin/ollama", "/usr/bin/ollama"],
+                [*_linux_sudo(), "rm", "-rf", "/usr/local/lib/ollama", "/usr/share/ollama"],
+            ]
+        )
+        for args in linux_steps:
+            code = run_command(args, log)
+            if code != 0:
+                log(
+                    "Warning: Ollama uninstall step failed with exit code "
+                    + format_exit_code(code)
+                    + f": {' '.join(args)}"
+                )
+        if find_ollama():
+            err = "Ollama uninstall could not fully remove the ollama command on Linux."
+            log(err)
+            return (False, err)
+        return (True, package_name)
+
+    winget = find_winget()
+    if not winget:
+        err = "winget was not found. Cannot uninstall Ollama automatically."
+        log(err)
+        return (False, err)
+
+    code = run_command(
+        [
+            winget,
+            "uninstall",
+            "--id",
+            package_name,
+            "-e",
+            "--accept-source-agreements",
+            "--silent",
+            "--disable-interactivity",
+        ],
+        log,
+    )
+    if code != 0 and find_ollama():
+        err = f"{package_name} uninstall failed with exit code {format_exit_code(code)}"
+        log(err)
+        return (False, err)
+
+    return (True, package_name)
+
+
 def _linux_sudo() -> list[str]:
     return [] if is_admin() else ["sudo", "-A"]
 
@@ -1436,6 +1614,20 @@ def npm_install_global(
     env["npm_config_update_notifier"] = "false"
     sudo = _linux_sudo() if is_linux() else []
     return run_command([*sudo, npm_exe, *NPM_QUIET_FLAGS, "install", "-g", package_name], log, env=env)
+
+
+def npm_uninstall_global(
+    npm_exe: str,
+    package_name: str,
+    log: Callable[[str], None],
+) -> int:
+    env = os.environ.copy()
+    npm_dir = os.path.dirname(npm_exe)
+    if npm_dir:
+        env["PATH"] = npm_dir + os.pathsep + env.get("PATH", "")
+    env["npm_config_update_notifier"] = "false"
+    sudo = _linux_sudo() if is_linux() else []
+    return run_command([*sudo, npm_exe, *NPM_QUIET_FLAGS, "uninstall", "-g", package_name], log, env=env)
 
 
 def is_probably_windows_errno_exit_code(code: int) -> bool:
@@ -1535,25 +1727,37 @@ def _install_gui_app_winget(spec: GuiAppSpec, log: Callable[[str], None]) -> boo
     if not winget:
         log(f"{spec.label}: winget was not found. Cannot install.")
         return False
-    log(f"Installing {spec.label} via winget ({spec.winget_id})...")
-    code = run_command(
-        [
-            winget, "install", "--id", spec.winget_id, "-e",
-            "--accept-package-agreements", "--accept-source-agreements",
-            "--silent", "--disable-interactivity",
-        ],
-        log,
-    )
+    source_suffix = f", source={spec.winget_source}" if spec.winget_source else ""
+    log(f"Installing {spec.label} via winget ({spec.winget_id}{source_suffix})...")
+    install_args = [
+        winget,
+        "install",
+        "--id",
+        spec.winget_id,
+        "-e",
+        "--accept-package-agreements",
+        "--accept-source-agreements",
+        "--silent",
+        "--disable-interactivity",
+    ]
+    upgrade_args = [
+        winget,
+        "upgrade",
+        "--id",
+        spec.winget_id,
+        "-e",
+        "--accept-package-agreements",
+        "--accept-source-agreements",
+        "--silent",
+        "--disable-interactivity",
+    ]
+    if spec.winget_source:
+        install_args.extend(["--source", spec.winget_source])
+        upgrade_args.extend(["--source", spec.winget_source])
+    code = run_command(install_args, log)
     if code != 0:
         log(f"winget install returned exit code {format_exit_code(code)}; trying upgrade...")
-        code = run_command(
-            [
-                winget, "upgrade", "--id", spec.winget_id, "-e",
-                "--accept-package-agreements", "--accept-source-agreements",
-                "--silent", "--disable-interactivity",
-            ],
-            log,
-        )
+        code = run_command(upgrade_args, log)
         if code != 0:
             log(f"{spec.label} install/upgrade failed with exit code {format_exit_code(code)}.")
             return False
@@ -1561,10 +1765,98 @@ def _install_gui_app_winget(spec: GuiAppSpec, log: Callable[[str], None]) -> boo
     return True
 
 
-def _install_gui_app_browser_shortcut(spec: GuiAppSpec, log: Callable[[str], None]) -> bool:
-    """Create a .desktop shortcut that opens the app's web URL in the default browser."""
-    if not spec.linux_browser_url:
+def _gui_app_browser_url_for_platform(spec: GuiAppSpec) -> Optional[str]:
+    if is_windows():
+        return spec.windows_browser_url or spec.linux_browser_url
+    if is_linux():
+        return spec.linux_browser_url or spec.windows_browser_url
+    return None
+
+
+def _gui_app_browser_shortcut_paths(spec: GuiAppSpec) -> list[str]:
+    desktop_dir = find_desktop_directory()
+    if is_windows():
+        return [os.path.join(desktop_dir, f"{spec.label}.url")]
+    return [
+        os.path.join(os.path.expanduser("~"), ".local", "share", "applications", f"installcli-{spec.key}.desktop"),
+        os.path.join(desktop_dir, f"{spec.label}.desktop"),
+    ]
+
+
+def _probe_command(args: list[str]) -> Optional[subprocess.CompletedProcess[str]]:
+    try:
+        return subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            **subprocess_creationflags_kwargs(),
+        )
+    except OSError:
+        return None
+
+
+def _winget_app_installed(winget_id: str, winget_source: Optional[str] = None) -> bool:
+    winget = find_winget()
+    if not winget:
         return False
+    args = [winget, "list", "--id", winget_id, "-e", "--accept-source-agreements"]
+    if winget_source:
+        args.extend(["--source", winget_source])
+    completed = _probe_command(args)
+    if not completed or completed.returncode != 0:
+        return False
+    combined = ((completed.stdout or "") + "\n" + (completed.stderr or "")).lower()
+    return winget_id.lower() in combined
+
+
+def _flatpak_app_installed(flatpak_id: str) -> bool:
+    if not shutil.which("flatpak"):
+        return False
+    completed = _probe_command(["flatpak", "list", "--app", "--columns=application"])
+    if not completed or completed.returncode != 0:
+        return False
+    rows = [line.strip() for line in (completed.stdout or "").splitlines() if line.strip()]
+    return flatpak_id in rows
+
+
+def _snap_app_installed(snap_name: str) -> bool:
+    if not shutil.which("snap"):
+        return False
+    completed = _probe_command(["snap", "list", snap_name])
+    return bool(completed and completed.returncode == 0)
+
+
+def is_gui_app_installed(spec: GuiAppSpec) -> bool:
+    if is_windows():
+        if spec.winget_id and _winget_app_installed(spec.winget_id, spec.winget_source):
+            return True
+    elif is_linux():
+        if spec.flatpak_id and _flatpak_app_installed(spec.flatpak_id):
+            return True
+        if spec.snap_name and _snap_app_installed(spec.snap_name):
+            return True
+    for path in _gui_app_browser_shortcut_paths(spec):
+        if os.path.isfile(path):
+            return True
+    return False
+
+
+def _install_gui_app_browser_shortcut(spec: GuiAppSpec, log: Callable[[str], None]) -> bool:
+    url = _gui_app_browser_url_for_platform(spec)
+    if not url:
+        return False
+    if is_windows():
+        desktop_shortcut = _gui_app_browser_shortcut_paths(spec)[0]
+        os.makedirs(os.path.dirname(desktop_shortcut), exist_ok=True)
+        lines = [
+            "[InternetShortcut]",
+            f"URL={url}",
+        ]
+        write_text_file(desktop_shortcut, "\n".join(lines) + "\n")
+        log(f"Created browser shortcut for {spec.label} → {url}")
+        log(f"Created desktop shortcut: {desktop_shortcut}")
+        return True
+
     apps_dir = os.path.join(os.path.expanduser("~"), ".local", "share", "applications")
     os.makedirs(apps_dir, exist_ok=True)
     desktop_path = os.path.join(apps_dir, f"installcli-{spec.key}.desktop")
@@ -1573,14 +1865,14 @@ def _install_gui_app_browser_shortcut(spec: GuiAppSpec, log: Callable[[str], Non
         "Type=Application",
         f"Name={spec.label}",
         f"Comment={spec.help_text}",
-        f"Exec=xdg-open {spec.linux_browser_url}",
+        f"Exec=xdg-open {url}",
         "Icon=applications-internet",
         "Categories=Network;",
         "StartupNotify=false",
     ]
     write_text_file(desktop_path, "\n".join(lines) + "\n")
     os.chmod(desktop_path, 0o755)
-    log(f"Created browser shortcut for {spec.label} → {spec.linux_browser_url}")
+    log(f"Created browser shortcut for {spec.label} → {url}")
     desktop_dir = find_desktop_directory()
     if desktop_dir:
         desktop_shortcut = os.path.join(desktop_dir, f"{spec.label}.desktop")
@@ -1590,20 +1882,132 @@ def _install_gui_app_browser_shortcut(spec: GuiAppSpec, log: Callable[[str], Non
     return True
 
 
+def _uninstall_gui_app_winget(spec: GuiAppSpec, log: Callable[[str], None]) -> bool:
+    if not spec.winget_id:
+        return False
+    winget = find_winget()
+    if not winget:
+        log(f"{spec.label}: winget was not found. Cannot uninstall.")
+        return False
+    source_suffix = f", source={spec.winget_source}" if spec.winget_source else ""
+    log(f"Uninstalling {spec.label} via winget ({spec.winget_id}{source_suffix})...")
+    args = [
+        winget,
+        "uninstall",
+        "--id",
+        spec.winget_id,
+        "-e",
+        "--accept-source-agreements",
+        "--silent",
+        "--disable-interactivity",
+    ]
+    if spec.winget_source:
+        args.extend(["--source", spec.winget_source])
+    code = run_command(args, log)
+    if code != 0:
+        log(f"{spec.label} winget uninstall returned exit code {format_exit_code(code)}.")
+    return code == 0
+
+
+def _uninstall_gui_app_flatpak(spec: GuiAppSpec, log: Callable[[str], None]) -> bool:
+    if not spec.flatpak_id:
+        return False
+    if not shutil.which("flatpak"):
+        return False
+    log(f"Uninstalling {spec.label} via Flatpak ({spec.flatpak_id})...")
+    code = run_command(
+        [*_linux_sudo(), "flatpak", "uninstall", spec.flatpak_id, "-y", "--noninteractive", "--delete-data"],
+        log,
+    )
+    if code != 0:
+        log(f"{spec.label} Flatpak uninstall returned exit code {format_exit_code(code)}.")
+    return code == 0
+
+
+def _uninstall_gui_app_snap(spec: GuiAppSpec, log: Callable[[str], None]) -> bool:
+    if not spec.snap_name:
+        return False
+    if not shutil.which("snap"):
+        return False
+    log(f"Uninstalling {spec.label} via Snap ({spec.snap_name})...")
+    code = run_command([*_linux_sudo(), "snap", "remove", spec.snap_name], log)
+    if code != 0:
+        log(f"{spec.label} Snap uninstall returned exit code {format_exit_code(code)}.")
+    return code == 0
+
+
+def _uninstall_gui_app_browser_shortcut(spec: GuiAppSpec, log: Callable[[str], None]) -> bool:
+    url = _gui_app_browser_url_for_platform(spec)
+    if not url:
+        return False
+    removed_any = False
+    for path in _gui_app_browser_shortcut_paths(spec):
+        if not os.path.isfile(path):
+            continue
+        try:
+            os.remove(path)
+            removed_any = True
+            log(f"Removed browser shortcut: {path}")
+        except OSError as exc:
+            log(f"Warning: failed to remove browser shortcut {path}: {exc}")
+            return False
+    if is_linux() and removed_any:
+        update_desktop_database_for_user(log)
+    return True
+
+
 def install_gui_app(spec: GuiAppSpec, log: Callable[[str], None]) -> bool:
     if is_windows():
-        return _install_gui_app_winget(spec, log)
+        if spec.winget_id and _install_gui_app_winget(spec, log):
+            return True
+        if _install_gui_app_browser_shortcut(spec, log):
+            return True
+        log(f"{spec.label}: No Windows install method available. Please install it manually from the app's website.")
+        return False
     if is_linux():
         if spec.flatpak_id and _install_gui_app_flatpak(spec, log):
             return True
         if spec.snap_name and _install_gui_app_snap(spec, log):
             return True
-        if spec.linux_browser_url and _install_gui_app_browser_shortcut(spec, log):
+        if _install_gui_app_browser_shortcut(spec, log):
             return True
         log(f"{spec.label}: No Linux install method available. Please install it manually from the app's website.")
         return False
     log(f"{spec.label}: Unsupported platform.")
     return False
+
+
+def uninstall_gui_app(spec: GuiAppSpec, log: Callable[[str], None]) -> bool:
+    attempted = False
+    if is_windows():
+        if spec.winget_id:
+            attempted = True
+            _uninstall_gui_app_winget(spec, log)
+        if _gui_app_browser_url_for_platform(spec):
+            attempted = True
+            _uninstall_gui_app_browser_shortcut(spec, log)
+    elif is_linux():
+        if spec.flatpak_id:
+            attempted = True
+            _uninstall_gui_app_flatpak(spec, log)
+        if spec.snap_name:
+            attempted = True
+            _uninstall_gui_app_snap(spec, log)
+        if _gui_app_browser_url_for_platform(spec):
+            attempted = True
+            _uninstall_gui_app_browser_shortcut(spec, log)
+    else:
+        log(f"{spec.label}: Unsupported platform.")
+        return False
+
+    if not attempted:
+        log(f"{spec.label}: No uninstall method available.")
+        return False
+    if is_gui_app_installed(spec):
+        log(f"{spec.label} still appears installed after uninstall attempt.")
+        return False
+    log(f"Uninstall completed for {spec.label}.")
+    return True
 
 
 def try_install_package_candidates(
@@ -1631,6 +2035,39 @@ def try_install_package_candidates(
             last_error = f"{package_name} failed with exit code {format_exit_code(code)}"
             log(last_error)
             break
+    return (False, last_error)
+
+
+def try_uninstall_package_candidates(
+    npm_exe: str,
+    spec: CliSpec,
+    log: Callable[[str], None],
+) -> tuple[bool, Optional[str]]:
+    last_error: Optional[str] = None
+    saw_success = False
+    for package_name in spec.package_candidates:
+        for attempt in range(1, NPM_INSTALL_MAX_ATTEMPTS + 1):
+            suffix = "" if attempt == 1 else f" (attempt {attempt}/{NPM_INSTALL_MAX_ATTEMPTS})"
+            log(f"Trying npm package uninstall for {spec.label}: {package_name}{suffix}")
+            code = npm_uninstall_global(npm_exe, package_name, log)
+            if code == 0:
+                saw_success = True
+                break
+
+            if attempt < NPM_INSTALL_MAX_ATTEMPTS and is_probably_windows_errno_exit_code(code):
+                log(
+                    "Transient npm uninstall failure detected (possible Windows file lock). "
+                    + f"Retrying in {NPM_INSTALL_RETRY_DELAY_SECONDS:.0f}s..."
+                )
+                time.sleep(NPM_INSTALL_RETRY_DELAY_SECONDS)
+                continue
+
+            last_error = f"{package_name} uninstall failed with exit code {format_exit_code(code)}"
+            log(last_error)
+            break
+
+    if saw_success:
+        return (True, None)
     return (False, last_error)
 
 
@@ -1782,6 +2219,37 @@ def create_cli_desktop_shortcut(
     return shortcut_path
 
 
+def remove_cli_desktop_shortcuts(spec: CliSpec, log: Callable[[str], None]) -> None:
+    desktop = find_desktop_directory()
+    paths: list[str] = []
+    if is_windows():
+        paths.append(os.path.join(desktop, f"{spec.shortcut_name}.lnk"))
+    else:
+        paths.append(os.path.join(desktop, f"{spec.shortcut_name}.desktop"))
+        paths.append(
+            os.path.join(
+                os.path.expanduser("~"),
+                ".local",
+                "share",
+                "applications",
+                f"installcli-{spec.key}.desktop",
+            )
+        )
+
+    removed_any = False
+    for path in paths:
+        try:
+            if os.path.isfile(path):
+                os.remove(path)
+                log(f"Removed shortcut: {path}")
+                removed_any = True
+        except OSError as exc:
+            log(f"Warning: Could not remove shortcut {path}: {exc}")
+
+    if is_linux() and removed_any:
+        update_desktop_database_for_user(log)
+
+
 class InstallerFrame(wx.Frame):
     def __init__(self) -> None:  # pragma: no cover
         platform_label = "Windows 11" if is_windows() else "Linux"
@@ -1812,7 +2280,7 @@ class InstallerFrame(wx.Frame):
                 if is_windows()
                 else "This installer uses your Linux package manager for Node.js/npm, the official Ollama install script, npm for most CLI tools, and uv/pip for Mistral Vibe."
             ),
-            "Use Tab and Space to navigate/select checkboxes. Native wxPython controls are used for NVDA/JAWS compatibility.",
+            "Use Tab and Enter/Space to run install/uninstall actions for each CLI, or use Install All.",
             "Run as Administrator/root if you want system-level installs and PATH updates to succeed.",
         ]
         note = wx.StaticText(panel, label="\n".join(note_lines))
@@ -1826,31 +2294,43 @@ class InstallerFrame(wx.Frame):
         self.admin_label.SetName("Admin Status")
         root.Add(self.admin_label, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
 
-        box = wx.StaticBox(panel, label="Select CLI tools to install")
+        box = wx.StaticBox(panel, label="Install or uninstall CLI tools")
         box_sizer = wx.StaticBoxSizer(box, wx.VERTICAL)
 
-        self.checkboxes: dict[str, wx.CheckBox] = {}
+        self.cli_action_buttons: dict[str, wx.Button] = {}
+        self.cli_installed_state: dict[str, bool] = {spec.key: False for spec in CLI_SPECS}
         for spec in CLI_SPECS:
-            cb = wx.CheckBox(box, label=spec.label)
-            cb.SetName(spec.label)
-            cb.SetValue(False)
-            cb.SetToolTip(spec.help_text)
-            box_sizer.Add(cb, 0, wx.ALL, 6)
-            self.checkboxes[spec.key] = cb
+            row = wx.BoxSizer(wx.HORIZONTAL)
+            label = wx.StaticText(box, label=spec.label)
+            label.SetToolTip(spec.help_text)
+            action_btn = wx.Button(box, label=f"Install {spec.label}")
+            action_btn.SetName(f"{spec.label} Action")
+            action_btn.SetToolTip(spec.help_text)
+            action_btn.Bind(wx.EVT_BUTTON, lambda _evt, cli_key=spec.key: self.on_cli_action(cli_key))
+            row.Add(label, 1, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 8)
+            row.Add(action_btn, 0)
+            box_sizer.Add(row, 0, wx.ALL | wx.EXPAND, 6)
+            self.cli_action_buttons[spec.key] = action_btn
 
         root.Add(box_sizer, 0, wx.LEFT | wx.RIGHT | wx.EXPAND | wx.BOTTOM, 12)
 
-        app_box = wx.StaticBox(panel, label="Select AI desktop apps to install (Windows: winget; Linux: Flatpak/Snap)")
+        app_box = wx.StaticBox(panel, label="Install or uninstall AI desktop apps (Windows: winget/browser; Linux: Flatpak/Snap/browser)")
         app_box_sizer = wx.StaticBoxSizer(app_box, wx.VERTICAL)
 
-        self.gui_app_checkboxes: dict[str, wx.CheckBox] = {}
+        self.gui_app_action_buttons: dict[str, wx.Button] = {}
+        self.gui_app_installed_state: dict[str, bool] = {spec.key: False for spec in GUI_APP_SPECS}
         for app_spec in GUI_APP_SPECS:
-            cb = wx.CheckBox(app_box, label=app_spec.label)
-            cb.SetName(app_spec.label)
-            cb.SetValue(False)
-            cb.SetToolTip(app_spec.help_text)
-            app_box_sizer.Add(cb, 0, wx.ALL, 6)
-            self.gui_app_checkboxes[app_spec.key] = cb
+            row = wx.BoxSizer(wx.HORIZONTAL)
+            label = wx.StaticText(app_box, label=app_spec.label)
+            label.SetToolTip(app_spec.help_text)
+            action_btn = wx.Button(app_box, label=f"Install {app_spec.label}")
+            action_btn.SetName(f"{app_spec.label} Action")
+            action_btn.SetToolTip(app_spec.help_text)
+            action_btn.Bind(wx.EVT_BUTTON, lambda _evt, app_key=app_spec.key: self.on_gui_app_action(app_key))
+            row.Add(label, 1, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 8)
+            row.Add(action_btn, 0)
+            app_box_sizer.Add(row, 0, wx.ALL | wx.EXPAND, 6)
+            self.gui_app_action_buttons[app_spec.key] = action_btn
 
         root.Add(app_box_sizer, 0, wx.LEFT | wx.RIGHT | wx.EXPAND | wx.BOTTOM, 12)
 
@@ -1866,18 +2346,15 @@ class InstallerFrame(wx.Frame):
         root.Add(self.auto_update_checkbox, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
 
         btn_row = wx.BoxSizer(wx.HORIZONTAL)
-        self.select_all_btn = wx.Button(panel, label="Select &All")
-        self.select_none_btn = wx.Button(panel, label="Select &None")
-        self.install_btn = wx.Button(panel, label="&Install Selected")
+        self.install_all_btn = wx.Button(panel, label="Install &All")
+        self.install_btn = wx.Button(panel, label="Install Apps &All")
         self.close_btn = wx.Button(panel, label="&Close")
 
-        self.select_all_btn.Bind(wx.EVT_BUTTON, self.on_select_all)
-        self.select_none_btn.Bind(wx.EVT_BUTTON, self.on_select_none)
-        self.install_btn.Bind(wx.EVT_BUTTON, self.on_install)
+        self.install_all_btn.Bind(wx.EVT_BUTTON, self.on_install_all_toggle)
+        self.install_btn.Bind(wx.EVT_BUTTON, self.on_install_all_apps_toggle)
         self.close_btn.Bind(wx.EVT_BUTTON, self.on_close)
 
-        btn_row.Add(self.select_all_btn, 0, wx.RIGHT, 8)
-        btn_row.Add(self.select_none_btn, 0, wx.RIGHT, 8)
+        btn_row.Add(self.install_all_btn, 0, wx.RIGHT, 8)
         btn_row.Add(self.install_btn, 0, wx.RIGHT, 8)
         btn_row.AddStretchSpacer(1)
         btn_row.Add(self.close_btn, 0)
@@ -1904,7 +2381,9 @@ class InstallerFrame(wx.Frame):
         root.Add(self.log_ctrl, 1, wx.LEFT | wx.RIGHT | wx.BOTTOM | wx.EXPAND, 12)
 
         panel.SetSizer(root)
-        self.install_btn.SetDefault()
+        self.install_all_btn.SetDefault()
+        self.refresh_cli_action_buttons()
+        self.refresh_gui_app_action_buttons()
 
     def log(self, message: str) -> None:
         wx.CallAfter(self._append_log, message)
@@ -1933,55 +2412,86 @@ class InstallerFrame(wx.Frame):
     def set_busy(self, busy: bool) -> None:
         def _apply() -> None:
             self.install_btn.Enable(not busy)
-            self.select_all_btn.Enable(not busy)
-            self.select_none_btn.Enable(not busy)
+            install_all_btn = getattr(self, "install_all_btn", None)
+            if install_all_btn is not None:
+                install_all_btn.Enable(not busy)
+            for btn in getattr(self, "cli_action_buttons", {}).values():
+                btn.Enable(not busy)
+            for btn in getattr(self, "gui_app_action_buttons", {}).values():
+                btn.Enable(not busy)
             if busy:
                 self.gauge.Pulse()
         wx.CallAfter(_apply)
 
-    def on_select_all(self, _event: wx.CommandEvent) -> None:
-        for cb in self.checkboxes.values():
-            cb.SetValue(True)
-        for cb in self.gui_app_checkboxes.values():
-            cb.SetValue(True)
+    def _detection_log(self, _message: str) -> None:
+        return None
 
-    def on_select_none(self, _event: wx.CommandEvent) -> None:
-        for cb in self.checkboxes.values():
-            cb.SetValue(False)
-        for cb in self.gui_app_checkboxes.values():
-            cb.SetValue(False)
+    def _get_cli_detection_dirs(self) -> list[str]:
+        npm_exe = find_npm()
+        dirs = get_cli_bin_dirs(npm_exe, self._detection_log)
+        dirs = dedupe_preserve_order(dirs + get_python_cli_bin_dirs(self._detection_log))
+        dirs = dedupe_preserve_order(dirs + get_ollama_cli_bin_dirs(self._detection_log))
+        return dirs
+
+    def _is_cli_installed(self, spec: CliSpec, cli_dirs: Optional[list[str]] = None) -> bool:
+        if spec.key == "ollama":
+            return bool(find_ollama())
+        dirs = cli_dirs if cli_dirs is not None else self._get_cli_detection_dirs()
+        return bool(resolve_command_path(spec.command_candidates, dirs))
+
+    def _all_clis_installed(self) -> bool:
+        return bool(CLI_SPECS) and all(self.cli_installed_state.get(spec.key, False) for spec in CLI_SPECS)
+
+    def _all_gui_apps_installed(self) -> bool:
+        return bool(GUI_APP_SPECS) and all(self.gui_app_installed_state.get(spec.key, False) for spec in GUI_APP_SPECS)
+
+    def refresh_cli_action_buttons(self) -> None:
+        cli_dirs = self._get_cli_detection_dirs()
+        for spec in CLI_SPECS:
+            installed = self._is_cli_installed(spec, cli_dirs)
+            self.cli_installed_state[spec.key] = installed
+            button = self.cli_action_buttons.get(spec.key)
+            if button is not None:
+                action = "Uninstall" if installed else "Install"
+                button.SetLabel(f"{action} {spec.label}")
+
+        install_all_btn = getattr(self, "install_all_btn", None)
+        if install_all_btn is not None:
+            install_all_btn.SetLabel("&Uninstall All" if self._all_clis_installed() else "Install &All")
+
+    def refresh_gui_app_action_buttons(self) -> None:
+        for spec in GUI_APP_SPECS:
+            installed = is_gui_app_installed(spec)
+            self.gui_app_installed_state[spec.key] = installed
+            button = self.gui_app_action_buttons.get(spec.key)
+            if button is not None:
+                action = "Uninstall" if installed else "Install"
+                button.SetLabel(f"{action} {spec.label}")
+
+        install_apps_btn = getattr(self, "install_btn", None)
+        if install_apps_btn is not None:
+            install_apps_btn.SetLabel("&Uninstall All Apps" if self._all_gui_apps_installed() else "Install Apps &All")
 
     def on_close(self, _event: wx.CommandEvent) -> None:
         if self.worker_thread and self.worker_thread.is_alive():
             wx.MessageBox(
-                "Installation is still running. Wait for it to finish before closing.",
-                "Install In Progress",
+                "An install/uninstall workflow is still running. Wait for it to finish before closing.",
+                "Workflow In Progress",
                 wx.OK | wx.ICON_INFORMATION,
                 self,
             )
             return
         self.Close()
 
-    def on_install(self, _event: wx.CommandEvent) -> None:
+    def _prepare_for_worker_run(self) -> bool:
         if self.worker_thread and self.worker_thread.is_alive():
-            return
-
-        selected = [spec for spec in CLI_SPECS if self.checkboxes[spec.key].GetValue()]
-        selected_apps = [spec for spec in GUI_APP_SPECS if self.gui_app_checkboxes[spec.key].GetValue()]
-        if not selected and not selected_apps:
-            wx.MessageBox(
-                "Select at least one CLI or desktop app to install.",
-                "Nothing Selected",
-                wx.OK | wx.ICON_WARNING,
-                self,
-            )
-            return
+            return False
 
         self._askpass_script: Optional[str] = None
         if is_linux() and not is_admin() and _sudo_needs_password():
             password = self._prompt_sudo_password()
             if not password:
-                return
+                return False
             try:
                 self._askpass_script = _create_sudo_askpass_script(password)
                 os.environ["SUDO_ASKPASS"] = self._askpass_script
@@ -1992,7 +2502,7 @@ class InstallerFrame(wx.Frame):
                     wx.OK | wx.ICON_ERROR,
                     self,
                 )
-                return
+                return False
 
         self.log_ctrl.Clear()
         reset_log = getattr(self, "_reset_persistent_log_for_new_run", None)
@@ -2001,17 +2511,121 @@ class InstallerFrame(wx.Frame):
         self.set_status("Starting...")
         self.set_gauge(0)
         self.set_busy(True)
+        return True
+
+    def _auto_update_enabled(self) -> bool:
         auto_update_enabled = True
         auto_update_cb = getattr(self, "auto_update_checkbox", None)
         if auto_update_cb is not None and hasattr(auto_update_cb, "GetValue"):
             auto_update_enabled = bool(auto_update_cb.GetValue())
+        return auto_update_enabled
 
+    def _start_worker(self, target: Callable[..., None], args: tuple[object, ...]) -> None:
         self.worker_thread = threading.Thread(
-            target=self._install_worker,
-            args=(selected, selected_apps, auto_update_enabled),
+            target=target,
+            args=args,
             daemon=True,
         )
         self.worker_thread.start()
+
+    def on_cli_action(self, cli_key: str) -> None:
+        if self.worker_thread and self.worker_thread.is_alive():
+            return
+
+        spec = next((item for item in CLI_SPECS if item.key == cli_key), None)
+        if spec is None:
+            return
+        installed = self.cli_installed_state.get(spec.key, self._is_cli_installed(spec))
+        action = "uninstall" if installed else "install"
+        enable_auto_update = self._auto_update_enabled()
+
+        if not self._prepare_for_worker_run():
+            return
+        self._start_worker(
+            self._cli_action_worker,
+            (action, [spec], enable_auto_update),
+        )
+
+    def on_install_all_toggle(self, _event: wx.CommandEvent) -> None:
+        if self.worker_thread and self.worker_thread.is_alive():
+            return
+
+        self.refresh_cli_action_buttons()
+        install_all = not self._all_clis_installed()
+        action = "install" if install_all else "uninstall"
+        if install_all:
+            selected = [spec for spec in CLI_SPECS if not self.cli_installed_state.get(spec.key, False)]
+        else:
+            selected = [spec for spec in CLI_SPECS if self.cli_installed_state.get(spec.key, False)]
+
+        if not selected:
+            wx.MessageBox(
+                ("All supported CLI tools are already installed." if install_all else "No installed CLI tools were detected."),
+                "Nothing To Do",
+                wx.OK | wx.ICON_INFORMATION,
+                self,
+            )
+            return
+
+        if not self._prepare_for_worker_run():
+            return
+        self._start_worker(
+            self._cli_action_worker,
+            (action, selected, self._auto_update_enabled()),
+        )
+
+    def on_gui_app_action(self, app_key: str) -> None:
+        if self.worker_thread and self.worker_thread.is_alive():
+            return
+
+        spec = next((item for item in GUI_APP_SPECS if item.key == app_key), None)
+        if spec is None:
+            return
+        installed = self.gui_app_installed_state.get(spec.key, is_gui_app_installed(spec))
+        action = "uninstall" if installed else "install"
+
+        if not self._prepare_for_worker_run():
+            return
+
+        self._start_worker(
+            self._gui_app_action_worker,
+            (action, [spec]),
+        )
+
+    def on_install_all_apps_toggle(self, _event: wx.CommandEvent) -> None:
+        if self.worker_thread and self.worker_thread.is_alive():
+            return
+
+        self.refresh_gui_app_action_buttons()
+        install_all = not self._all_gui_apps_installed()
+        action = "install" if install_all else "uninstall"
+        if install_all:
+            selected_apps = [spec for spec in GUI_APP_SPECS if not self.gui_app_installed_state.get(spec.key, False)]
+        else:
+            selected_apps = [spec for spec in GUI_APP_SPECS if self.gui_app_installed_state.get(spec.key, False)]
+
+        if not selected_apps:
+            wx.MessageBox(
+                ("All supported desktop apps are already installed." if install_all else "No installed desktop apps were detected."),
+                "Nothing To Do",
+                wx.OK | wx.ICON_INFORMATION,
+                self,
+            )
+            return
+
+        if not self._prepare_for_worker_run():
+            return
+
+        self._start_worker(
+            self._gui_app_action_worker,
+            (action, selected_apps),
+        )
+
+    def on_install(self, event: wx.CommandEvent) -> None:
+        InstallerFrame.on_install_all_apps_toggle(self, event)
+
+    def on_install_apps(self, event: wx.CommandEvent) -> None:
+        InstallerFrame.on_install_all_apps_toggle(self, event)
 
     def _prompt_sudo_password(self) -> Optional[str]:  # pragma: no cover
         dlg = wx.PasswordEntryDialog(
@@ -2034,12 +2648,18 @@ class InstallerFrame(wx.Frame):
             self._askpass_script = None
         os.environ.pop("SUDO_ASKPASS", None)
 
-    def _install_worker(self, selected: list[CliSpec], selected_apps: list[GuiAppSpec], enable_auto_update: bool = True) -> None:
+    def _install_worker(
+        self,
+        selected: list[CliSpec],
+        selected_apps: Optional[list[GuiAppSpec]] = None,
+        enable_auto_update: bool = True,
+    ) -> None:
+        chosen_apps = selected_apps or []
         try:
             if selected:
                 self._run_install(selected, enable_auto_update)
-            if selected_apps:
-                self._run_gui_apps_install(selected_apps)
+            if chosen_apps:
+                self._run_gui_apps_install(chosen_apps)
             self.log("Installation workflow complete.")
             self.set_status("Complete")
             self.set_gauge(100)
@@ -2049,7 +2669,80 @@ class InstallerFrame(wx.Frame):
             self.set_status("Failed")
         finally:
             self.set_busy(False)
-            self._cleanup_askpass()
+            cleanup = getattr(self, "_cleanup_askpass", None)
+            if callable(cleanup):
+                cleanup()
+            refresh_cli = getattr(self, "refresh_cli_action_buttons", None)
+            if callable(refresh_cli):
+                wx.CallAfter(refresh_cli)
+            refresh_apps = getattr(self, "refresh_gui_app_action_buttons", None)
+            if callable(refresh_apps):
+                wx.CallAfter(refresh_apps)
+
+    def _cli_action_worker(
+        self,
+        action: str,
+        selected: list[CliSpec],
+        enable_auto_update: bool = True,
+    ) -> None:
+        try:
+            if action == "install":
+                self._run_install(selected, enable_auto_update)
+                self.log("CLI installation workflow complete.")
+            elif action == "uninstall":
+                self._run_uninstall(selected)
+                self.log("CLI uninstall workflow complete.")
+            else:
+                raise RuntimeError(f"Unsupported CLI action: {action}")
+            self.set_status("Complete")
+            self.set_gauge(100)
+        except Exception as exc:
+            self.log(f"ERROR: {exc}")
+            self.log(traceback.format_exc().rstrip())
+            self.set_status("Failed")
+        finally:
+            self.set_busy(False)
+            cleanup = getattr(self, "_cleanup_askpass", None)
+            if callable(cleanup):
+                cleanup()
+            refresh_cli = getattr(self, "refresh_cli_action_buttons", None)
+            if callable(refresh_cli):
+                wx.CallAfter(refresh_cli)
+            refresh_apps = getattr(self, "refresh_gui_app_action_buttons", None)
+            if callable(refresh_apps):
+                wx.CallAfter(refresh_apps)
+
+    def _gui_app_action_worker(
+        self,
+        action: str,
+        selected_apps: list[GuiAppSpec],
+    ) -> None:
+        try:
+            if action == "install":
+                self._run_gui_apps_install(selected_apps)
+                self.log("Desktop app installation workflow complete.")
+            elif action == "uninstall":
+                self._run_gui_apps_uninstall(selected_apps)
+                self.log("Desktop app uninstall workflow complete.")
+            else:
+                raise RuntimeError(f"Unsupported desktop-app action: {action}")
+            self.set_status("Complete")
+            self.set_gauge(100)
+        except Exception as exc:
+            self.log(f"ERROR: {exc}")
+            self.log(traceback.format_exc().rstrip())
+            self.set_status("Failed")
+        finally:
+            self.set_busy(False)
+            cleanup = getattr(self, "_cleanup_askpass", None)
+            if callable(cleanup):
+                cleanup()
+            refresh_cli = getattr(self, "refresh_cli_action_buttons", None)
+            if callable(refresh_cli):
+                wx.CallAfter(refresh_cli)
+            refresh_apps = getattr(self, "refresh_gui_app_action_buttons", None)
+            if callable(refresh_apps):
+                wx.CallAfter(refresh_apps)
 
     def _run_gui_apps_install(self, selected_apps: list[GuiAppSpec]) -> None:
         total = len(selected_apps)
@@ -2065,6 +2758,85 @@ class InstallerFrame(wx.Frame):
                 self.log(f"Warning: Could not install {app_spec.label}.")
         if is_linux() and any_installed:
             update_desktop_database_for_user(self.log)
+
+    def _run_gui_apps_uninstall(self, selected_apps: list[GuiAppSpec]) -> None:
+        total = len(selected_apps)
+        any_uninstalled = False
+        for index, app_spec in enumerate(selected_apps, start=1):
+            pct = int((index - 1) / max(total, 1) * 80) + 10
+            self.set_gauge(pct)
+            self.set_status(f"Uninstalling {app_spec.label} ({index}/{total})")
+            success = uninstall_gui_app(app_spec, self.log)
+            if success:
+                any_uninstalled = True
+            else:
+                if app_spec.optional:
+                    self.log(f"Warning: Could not uninstall optional {app_spec.label}.")
+                    continue
+                raise RuntimeError(f"Failed to uninstall {app_spec.label}.")
+        if is_linux() and any_uninstalled:
+            update_desktop_database_for_user(self.log)
+
+    def _run_uninstall(self, selected: list[CliSpec]) -> None:
+        self.log(("Windows 11 AI CLI Uninstaller started." if is_windows() else "Linux AI CLI Uninstaller started."))
+        persistent_log_path = getattr(self, "_persistent_log_path", None)
+        if persistent_log_path:
+            self.log(f"Persistent log file: {persistent_log_path}")
+        self.log(f"Administrator mode: {'Yes' if is_admin() else 'No'}")
+
+        if not selected:
+            self.log("No CLI tools selected for uninstall.")
+            return
+
+        needs_npm = any(spec.key not in ("mistral", "ollama") for spec in selected)
+        npm_exe: Optional[str] = None
+        if needs_npm:
+            self.set_status("Locating npm")
+            self.set_gauge(10)
+            npm_exe = find_npm()
+            if not npm_exe:
+                raise RuntimeError("npm was not found. Install Node.js/npm before uninstalling npm-based CLIs.")
+            self.log(f"Using npm executable: {npm_exe}")
+
+        removed_npm_packages: list[str] = []
+        total = len(selected)
+        for index, spec in enumerate(selected, start=1):
+            pct = 15 + int((index - 1) / max(total, 1) * 70)
+            self.set_gauge(pct)
+            self.set_status(f"Uninstalling {spec.label} ({index}/{total})")
+
+            if spec.key == "mistral":
+                success, detail = try_uninstall_mistral_vibe(spec, self.log)
+            elif spec.key == "ollama":
+                success, detail = try_uninstall_ollama(self.log)
+            else:
+                assert npm_exe is not None
+                success, detail = try_uninstall_package_candidates(npm_exe, spec, self.log)
+
+            if not success:
+                if spec.optional:
+                    self.log(f"Warning: Could not uninstall optional {spec.label}: {detail}")
+                    continue
+                raise RuntimeError(f"Failed to uninstall {spec.label}.")
+
+            self.log(f"Uninstall completed for {spec.label}.")
+            remove_cli_desktop_shortcuts(spec, self.log)
+            if spec.key not in ("mistral", "ollama"):
+                removed_npm_packages.extend(spec.package_candidates)
+
+        if removed_npm_packages and is_windows():
+            self.set_status("Updating auto-update package list")
+            self.set_gauge(90)
+            remaining = remove_cli_auto_update_packages(removed_npm_packages, self.log)
+            if remaining:
+                self.log("Remaining npm packages in auto-update list: " + ", ".join(remaining))
+            else:
+                self.log("No npm packages remain in auto-update list.")
+
+        self.set_status("Finalizing")
+        self.set_gauge(98)
+        self.log("")
+        self.log("CLI uninstall run complete.")
 
     def _run_install(self, selected: list[CliSpec], enable_auto_update: bool = True) -> None:
         self.log(("Windows 11 AI CLI Installer started." if is_windows() else "Linux AI CLI Installer started."))

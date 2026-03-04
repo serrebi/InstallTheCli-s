@@ -168,6 +168,12 @@ class UtilityFunctionTests(unittest.TestCase):
         self.assertEqual(ollama.command_candidates, ("ollama",))
         self.assertIn("official", ollama.help_text.lower())
 
+    def test_codex_desktop_app_spec_uses_msstore_product_id(self) -> None:
+        codex_app = next(spec for spec in m.GUI_APP_SPECS if spec.key == "codex_app")
+        self.assertEqual(codex_app.winget_id, "9PLM9XGG6VKS")
+        self.assertEqual(codex_app.winget_source, "msstore")
+        self.assertIsNone(codex_app.windows_browser_url)
+
     def test_split_path_filters_empty_parts(self) -> None:
         self.assertEqual(m.split_path(""), [])
         self.assertEqual(m.split_path("A;;B;"), ["A", "B"])
@@ -667,7 +673,16 @@ class RegistryAndWindowsTests(unittest.TestCase):
             path = m.create_cli_desktop_shortcut(spec, "/usr/local/bin/ollama", logs.append)
         expected_path = os.path.join("/home/admin/Desktop", "Ollama CLI.desktop")
         self.assertEqual(path, expected_path)
-        create_linux_mock.assert_called_once_with(expected_path, "/usr/local/bin/ollama", "Ollama CLI")
+        expected_menu = os.path.join(
+            os.path.expanduser("~"),
+            ".local",
+            "share",
+            "applications",
+            "installcli-ollama.desktop",
+        )
+        self.assertEqual(create_linux_mock.call_count, 2)
+        self.assertEqual(create_linux_mock.call_args_list[0].args[:3], (expected_path, "/usr/local/bin/ollama", "Ollama CLI"))
+        self.assertEqual(create_linux_mock.call_args_list[1].args[:3], (expected_menu, "/usr/local/bin/ollama", "Ollama CLI"))
         self.assertTrue(any("Created desktop shortcut:" in line for line in logs))
 
 
@@ -1152,6 +1167,36 @@ class CommandAndDetectionTests(unittest.TestCase):
         env = run_mock.call_args.kwargs["env"]
         self.assertTrue(env["PATH"].startswith(r"C:\Program Files\nodejs;"))
 
+    def test_npm_uninstall_global_delegates_to_run_command(self) -> None:
+        with (
+            patch.object(m, "run_command", return_value=0) as run_mock,
+            patch.dict(m.os.environ, {"PATH": r"C:\Windows\System32"}, clear=False),
+        ):
+            m.npm_uninstall_global(r"C:\Program Files\nodejs\npm.cmd", "@openai/codex", lambda _msg: None)
+        self.assertEqual(
+            run_mock.call_args.args[0],
+            [
+                r"C:\Program Files\nodejs\npm.cmd",
+                "--no-fund",
+                "--no-audit",
+                "--no-update-notifier",
+                "--loglevel",
+                "error",
+                "uninstall",
+                "-g",
+                "@openai/codex",
+            ],
+        )
+        self.assertEqual(run_mock.call_args.kwargs["env"]["npm_config_update_notifier"], "false")
+
+    def test_try_uninstall_package_candidates_returns_error_when_uninstalls_fail(self) -> None:
+        logs: list[str] = []
+        codex = next(spec for spec in m.CLI_SPECS if spec.key == "codex")
+        with patch.object(m, "npm_uninstall_global", return_value=11):
+            ok, err = m.try_uninstall_package_candidates("npm.cmd", codex, logs.append)
+        self.assertFalse(ok)
+        self.assertIn("uninstall failed with exit code 11", str(err))
+
     def test_windows_errno_exit_code_helpers(self) -> None:
         self.assertTrue(m.is_probably_windows_errno_exit_code(4294963214))
         self.assertFalse(m.is_probably_windows_errno_exit_code(1))
@@ -1271,6 +1316,66 @@ class CommandAndDetectionTests(unittest.TestCase):
             patch.object(m, "where_all", return_value=["/tmp/tool"]),
         ):
             self.assertEqual(m.resolve_command_path(("tool",), []), "/tmp/tool")
+
+    def test_install_gui_app_windows_uses_browser_shortcut_when_no_winget_id(self) -> None:
+        spec = types.SimpleNamespace(
+            key="web_only_app",
+            label="Web Only App (Desktop)",
+            help_text="x",
+            winget_id=None,
+            winget_source=None,
+            flatpak_id=None,
+            snap_name=None,
+            windows_browser_url="https://example.com/app",
+            linux_browser_url="https://example.com/app",
+            optional=True,
+        )
+        with (
+            patch.object(m, "is_windows", return_value=True),
+            patch.object(m, "_install_gui_app_browser_shortcut", return_value=True) as browser_mock,
+        ):
+            self.assertTrue(m.install_gui_app(spec, lambda _msg: None))
+        browser_mock.assert_called_once()
+
+    def test_is_gui_app_installed_detects_browser_shortcut(self) -> None:
+        spec = types.SimpleNamespace(
+            key="web_only_app",
+            label="Web Only App (Desktop)",
+            winget_id=None,
+            winget_source=None,
+            flatpak_id=None,
+            snap_name=None,
+            windows_browser_url="https://example.com/app",
+            linux_browser_url="https://example.com/app",
+        )
+        with (
+            patch.object(m, "is_windows", return_value=True),
+            patch.object(m, "find_desktop_directory", return_value=r"C:\Users\Admin\Desktop"),
+            patch.object(m.os.path, "isfile", side_effect=lambda p: p.endswith("Web Only App (Desktop).url")),
+        ):
+            self.assertTrue(m.is_gui_app_installed(spec))
+
+    def test_install_gui_app_winget_uses_source_when_configured(self) -> None:
+        spec = next(item for item in m.GUI_APP_SPECS if item.key == "codex_app")
+        with (
+            patch.object(m, "find_winget", return_value="winget.exe"),
+            patch.object(m, "run_command", return_value=0) as run_mock,
+        ):
+            ok = m._install_gui_app_winget(spec, lambda _msg: None)
+        self.assertTrue(ok)
+        args = run_mock.call_args.args[0]
+        self.assertIn("--source", args)
+        self.assertIn("msstore", args)
+
+    def test_uninstall_gui_app_returns_true_when_no_longer_detected(self) -> None:
+        spec = next(item for item in m.GUI_APP_SPECS if item.key == "chatgpt_app")
+        with (
+            patch.object(m, "is_windows", return_value=True),
+            patch.object(m, "_uninstall_gui_app_winget", return_value=False),
+            patch.object(m, "_uninstall_gui_app_browser_shortcut", return_value=True),
+            patch.object(m, "is_gui_app_installed", return_value=False),
+        ):
+            self.assertTrue(m.uninstall_gui_app(spec, lambda _msg: None))
 
 
 class AutoUpdateSchedulerTests(unittest.TestCase):
@@ -1392,6 +1497,18 @@ class AutoUpdateSchedulerTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError) as ctx:
                     m.ensure_cli_auto_update_task("npm.cmd", ["@openai/codex"], lambda _msg: None)
         self.assertIn("Unable to configure hidden CLI auto-update task", str(ctx.exception))
+
+    def test_remove_cli_auto_update_packages_updates_file(self) -> None:
+        with tempfile.TemporaryDirectory(dir=".") as tmp_dir:
+            packages_path = os.path.join(tmp_dir, m.AUTO_UPDATE_PACKAGES_FILE)
+            m.write_nonempty_lines(packages_path, ["@openai/codex", "@google/gemini-cli", "@vibe-kit/grok-cli"])
+            with patch.object(m, "get_app_support_directory", return_value=tmp_dir):
+                remaining = m.remove_cli_auto_update_packages(["@google/gemini-cli"], lambda _msg: None)
+        self.assertEqual(remaining, ["@openai/codex", "@vibe-kit/grok-cli"])
+
+    def test_remove_cli_auto_update_packages_is_noop_on_linux(self) -> None:
+        with patch.object(m, "is_windows", return_value=False):
+            self.assertEqual(m.remove_cli_auto_update_packages(["@openai/codex"], lambda _msg: None), [])
 
 
 class NodeInstallAndWorkflowTests(unittest.TestCase):
@@ -1908,14 +2025,40 @@ class NodeInstallAndWorkflowTests(unittest.TestCase):
         self.assertIn("exit code 7", str(err))
         self.assertTrue(any("uv was not found; falling back to pip" in line for line in logs))
 
+    def test_try_uninstall_mistral_vibe_returns_true_when_uv_succeeds(self) -> None:
+        logs: list[str] = []
+        spec = next(item for item in m.CLI_SPECS if item.key == "mistral")
+        with (
+            patch.object(m, "find_uv", return_value="uv.exe"),
+            patch.object(m, "_find_python_for_mistral_uninstall", return_value=["py.exe", "-3.14"]),
+            patch.object(m, "run_command", side_effect=[0, 1]),
+        ):
+            ok, pkg = m.try_uninstall_mistral_vibe(spec, logs.append)
+        self.assertTrue(ok)
+        self.assertEqual(pkg, "mistral-vibe")
+
+    def test_try_uninstall_ollama_windows_uses_winget_uninstall(self) -> None:
+        logs: list[str] = []
+        with (
+            patch.object(m, "find_ollama", side_effect=[r"C:\Program Files\Ollama\ollama.exe", None]),
+            patch.object(m, "is_linux", return_value=False),
+            patch.object(m, "find_winget", return_value="winget.exe"),
+            patch.object(m, "run_command", return_value=0) as run_mock,
+        ):
+            ok, pkg = m.try_uninstall_ollama(logs.append)
+        self.assertTrue(ok)
+        self.assertEqual(pkg, m.OLLAMA_WINGET_ID)
+        self.assertIn("uninstall", run_mock.call_args.args[0])
+
     def test_install_worker_logs_failure_and_sets_failed_status(self) -> None:
         dummy = DummyFrame()
+        codex = next(spec for spec in m.CLI_SPECS if spec.key == "codex")
 
         def boom(_selected, _enable_auto_update=True):
             raise RuntimeError("boom")
 
         dummy._run_install = boom  # type: ignore[attr-defined]
-        m.InstallerFrame._install_worker(dummy, [])
+        m.InstallerFrame._install_worker(dummy, [codex], [])
 
         self.assertEqual(dummy.statuses[-1], "Failed")
         self.assertFalse(dummy.busy[-1])
@@ -2307,6 +2450,33 @@ class NodeInstallAndWorkflowTests(unittest.TestCase):
 
         self.assertTrue(any("Persistent log file: " in line for line in dummy.logs))
 
+    def test_run_uninstall_removes_shortcuts_and_updates_auto_update_packages(self) -> None:
+        dummy = DummyFrame()
+        dummy._run_uninstall = types.MethodType(m.InstallerFrame._run_uninstall, dummy)
+        codex = next(spec for spec in m.CLI_SPECS if spec.key == "codex")
+
+        with (
+            patch.object(m, "is_windows", return_value=True),
+            patch.object(m, "find_npm", return_value=r"C:\Fake\nodejs\npm.cmd"),
+            patch.object(m, "try_uninstall_package_candidates", return_value=(True, None)),
+            patch.object(m, "remove_cli_desktop_shortcuts") as remove_shortcuts_mock,
+            patch.object(m, "remove_cli_auto_update_packages", return_value=[]),
+        ):
+            dummy._run_uninstall([codex])
+
+        remove_shortcuts_mock.assert_called_once()
+        self.assertTrue(any("No npm packages remain in auto-update list." in line for line in dummy.logs))
+        self.assertTrue(any("CLI uninstall run complete." in line for line in dummy.logs))
+
+    def test_run_uninstall_raises_when_npm_missing_for_npm_cli(self) -> None:
+        dummy = DummyFrame()
+        dummy._run_uninstall = types.MethodType(m.InstallerFrame._run_uninstall, dummy)
+        codex = next(spec for spec in m.CLI_SPECS if spec.key == "codex")
+        with patch.object(m, "find_npm", return_value=None):
+            with self.assertRaises(RuntimeError) as ctx:
+                dummy._run_uninstall([codex])
+        self.assertIn("npm was not found", str(ctx.exception))
+
 
 class UiHandlerTests(unittest.TestCase):
     def test_append_log_writes_line_and_scrolls(self) -> None:
@@ -2380,13 +2550,15 @@ class UiHandlerTests(unittest.TestCase):
 
     def test_set_busy_disables_buttons_and_pulses_when_busy(self) -> None:
         install_btn = types.SimpleNamespace(Enable=MagicMock())
-        select_all_btn = types.SimpleNamespace(Enable=MagicMock())
-        select_none_btn = types.SimpleNamespace(Enable=MagicMock())
+        install_all_btn = types.SimpleNamespace(Enable=MagicMock())
+        cli_btn = types.SimpleNamespace(Enable=MagicMock())
+        app_btn = types.SimpleNamespace(Enable=MagicMock())
         gauge = types.SimpleNamespace(Pulse=MagicMock())
         dummy = types.SimpleNamespace(
             install_btn=install_btn,
-            select_all_btn=select_all_btn,
-            select_none_btn=select_none_btn,
+            install_all_btn=install_all_btn,
+            cli_action_buttons={"codex": cli_btn},
+            gui_app_action_buttons={"chatgpt_app": app_btn},
             gauge=gauge,
         )
 
@@ -2396,16 +2568,48 @@ class UiHandlerTests(unittest.TestCase):
 
         install_btn.Enable.assert_any_call(False)
         install_btn.Enable.assert_any_call(True)
-        select_all_btn.Enable.assert_any_call(False)
-        select_none_btn.Enable.assert_any_call(False)
+        install_all_btn.Enable.assert_any_call(False)
+        cli_btn.Enable.assert_any_call(False)
+        app_btn.Enable.assert_any_call(False)
         gauge.Pulse.assert_called_once()
 
-    def test_on_select_all_and_none_toggle_checkboxes(self) -> None:
-        dummy = types.SimpleNamespace(checkboxes={"a": DummyCheckbox(False), "b": DummyCheckbox(True)})
-        m.InstallerFrame.on_select_all(dummy, None)
-        self.assertTrue(all(cb.GetValue() for cb in dummy.checkboxes.values()))
-        m.InstallerFrame.on_select_none(dummy, None)
-        self.assertTrue(all(not cb.GetValue() for cb in dummy.checkboxes.values()))
+    def test_refresh_cli_action_buttons_updates_individual_and_bulk_labels(self) -> None:
+        buttons = {spec.key: types.SimpleNamespace(SetLabel=MagicMock()) for spec in m.CLI_SPECS}
+        dummy = types.SimpleNamespace(
+            cli_action_buttons=buttons,
+            cli_installed_state={spec.key: False for spec in m.CLI_SPECS},
+            install_all_btn=types.SimpleNamespace(SetLabel=MagicMock()),
+            _get_cli_detection_dirs=MagicMock(return_value=[]),
+        )
+        dummy._all_clis_installed = types.MethodType(m.InstallerFrame._all_clis_installed, dummy)
+        dummy._is_cli_installed = MagicMock(side_effect=lambda spec, _dirs: spec.key != "codex")
+
+        m.InstallerFrame.refresh_cli_action_buttons(dummy)
+        buttons["codex"].SetLabel.assert_called_with("Install Codex CLI")
+        dummy.install_all_btn.SetLabel.assert_called_with("Install &All")
+
+        dummy._is_cli_installed = MagicMock(return_value=True)
+        m.InstallerFrame.refresh_cli_action_buttons(dummy)
+        buttons["codex"].SetLabel.assert_called_with("Uninstall Codex CLI")
+        dummy.install_all_btn.SetLabel.assert_called_with("&Uninstall All")
+
+    def test_refresh_gui_app_action_buttons_updates_individual_and_bulk_labels(self) -> None:
+        buttons = {spec.key: types.SimpleNamespace(SetLabel=MagicMock()) for spec in m.GUI_APP_SPECS}
+        dummy = types.SimpleNamespace(
+            gui_app_action_buttons=buttons,
+            gui_app_installed_state={spec.key: False for spec in m.GUI_APP_SPECS},
+            install_btn=types.SimpleNamespace(SetLabel=MagicMock()),
+            _all_gui_apps_installed=MagicMock(return_value=False),
+        )
+        with patch.object(m, "is_gui_app_installed", side_effect=lambda spec: spec.key == "chatgpt_app"):
+            m.InstallerFrame.refresh_gui_app_action_buttons(dummy)
+        buttons["chatgpt_app"].SetLabel.assert_called_with("Uninstall ChatGPT App (Desktop)")
+        dummy.install_btn.SetLabel.assert_called_with("Install Apps &All")
+
+        dummy._all_gui_apps_installed = MagicMock(return_value=True)
+        with patch.object(m, "is_gui_app_installed", return_value=True):
+            m.InstallerFrame.refresh_gui_app_action_buttons(dummy)
+        dummy.install_btn.SetLabel.assert_called_with("&Uninstall All Apps")
 
     def test_on_close_blocks_when_worker_thread_running(self) -> None:
         dummy = types.SimpleNamespace(worker_thread=DummyThreadState(True), Close=MagicMock())
@@ -2425,153 +2629,126 @@ class UiHandlerTests(unittest.TestCase):
             m.InstallerFrame.on_install(dummy, None)
         msg_mock.assert_not_called()
 
-    def test_on_install_warns_when_no_cli_selected(self) -> None:
+    def test_on_install_all_apps_toggle_warns_when_nothing_to_do(self) -> None:
         dummy = types.SimpleNamespace(
             worker_thread=None,
-            checkboxes={spec.key: DummyCheckbox(False) for spec in m.CLI_SPECS},
-            auto_update_checkbox=DummyCheckbox(True),
-            log_ctrl=DummyLogCtrl(),
-            set_status=MagicMock(),
-            set_gauge=MagicMock(),
-            set_busy=MagicMock(),
-            _install_worker=MagicMock(),
+            gui_app_installed_state={spec.key: True for spec in m.GUI_APP_SPECS},
+            refresh_gui_app_action_buttons=MagicMock(),
+            _all_gui_apps_installed=MagicMock(return_value=False),
         )
         with patch.object(m.wx, "MessageBox") as msg_mock:
-            m.InstallerFrame.on_install(dummy, None)
+            m.InstallerFrame.on_install_all_apps_toggle(dummy, None)
         msg_mock.assert_called_once()
-        self.assertFalse(dummy.log_ctrl.cleared)
-        dummy.set_busy.assert_not_called()
 
-    def test_on_install_starts_worker_thread_for_selected_clis(self) -> None:
-        class ThreadSpy:
-            instances: list["ThreadSpy"] = []
-
-            def __init__(self, target, args, daemon) -> None:
-                self.target = target
-                self.args = args
-                self.daemon = daemon
-                self.started = False
-                ThreadSpy.instances.append(self)
-
-            def start(self) -> None:
-                self.started = True
-
-            def is_alive(self) -> bool:
-                return self.started
-
-        selected_key = "codex"
+    def test_on_install_all_apps_toggle_starts_install_for_missing_apps(self) -> None:
+        installed_state = {spec.key: (spec.key == "chatgpt_app") for spec in m.GUI_APP_SPECS}
         dummy = types.SimpleNamespace(
             worker_thread=None,
-            checkboxes={spec.key: DummyCheckbox(spec.key == selected_key) for spec in m.CLI_SPECS},
-            log_ctrl=DummyLogCtrl(),
-            set_status=MagicMock(),
-            set_gauge=MagicMock(),
-            set_busy=MagicMock(),
-            _install_worker=MagicMock(),
-            auto_update_checkbox=DummyCheckbox(True),
+            gui_app_installed_state=installed_state,
+            refresh_gui_app_action_buttons=MagicMock(),
+            _all_gui_apps_installed=MagicMock(return_value=False),
+            _prepare_for_worker_run=MagicMock(return_value=True),
+            _start_worker=MagicMock(),
+            _gui_app_action_worker=MagicMock(),
         )
 
-        with patch.object(m.threading, "Thread", ThreadSpy):
-            m.InstallerFrame.on_install(dummy, None)
+        m.InstallerFrame.on_install_all_apps_toggle(dummy, None)
 
-        self.assertTrue(dummy.log_ctrl.cleared)
-        dummy.set_status.assert_called_once_with("Starting...")
-        dummy.set_gauge.assert_called_once_with(0)
-        dummy.set_busy.assert_called_once_with(True)
-        self.assertIsNotNone(dummy.worker_thread)
-        self.assertTrue(ThreadSpy.instances[0].started)
-        self.assertTrue(ThreadSpy.instances[0].daemon)
-        chosen = ThreadSpy.instances[0].args[0]
-        self.assertEqual([spec.key for spec in chosen], [selected_key])
-        self.assertTrue(ThreadSpy.instances[0].args[1])
-        self.assertTrue(dummy.worker_thread.is_alive())
+        dummy._prepare_for_worker_run.assert_called_once_with()
+        dummy._start_worker.assert_called_once()
+        call_args = dummy._start_worker.call_args.args
+        self.assertIs(call_args[0], dummy._gui_app_action_worker)
+        self.assertEqual(call_args[1][0], "install")
+        selected_keys = [spec.key for spec in call_args[1][1]]
+        self.assertNotIn("chatgpt_app", selected_keys)
 
-    def test_on_install_resets_persistent_log_file_when_helper_present(self) -> None:
-        class ThreadSpy:
-            instances: list["ThreadSpy"] = []
-
-            def __init__(self, target, args, daemon) -> None:
-                self.args = args
-                ThreadSpy.instances.append(self)
-
-            def start(self) -> None:
-                return None
-
-        reset_mock = MagicMock()
-        selected_key = "codex"
+    def test_on_install_all_apps_toggle_starts_uninstall_when_all_installed(self) -> None:
         dummy = types.SimpleNamespace(
             worker_thread=None,
-            checkboxes={spec.key: DummyCheckbox(spec.key == selected_key) for spec in m.CLI_SPECS},
-            log_ctrl=DummyLogCtrl(),
-            set_status=MagicMock(),
-            set_gauge=MagicMock(),
-            set_busy=MagicMock(),
-            _install_worker=MagicMock(),
-            auto_update_checkbox=DummyCheckbox(True),
-            _reset_persistent_log_for_new_run=reset_mock,
+            gui_app_installed_state={spec.key: True for spec in m.GUI_APP_SPECS},
+            refresh_gui_app_action_buttons=MagicMock(),
+            _all_gui_apps_installed=MagicMock(return_value=True),
+            _prepare_for_worker_run=MagicMock(return_value=True),
+            _start_worker=MagicMock(),
+            _gui_app_action_worker=MagicMock(),
         )
 
-        with patch.object(m.threading, "Thread", ThreadSpy):
-            m.InstallerFrame.on_install(dummy, None)
+        m.InstallerFrame.on_install_all_apps_toggle(dummy, None)
+        call_args = dummy._start_worker.call_args.args
+        self.assertEqual(call_args[1][0], "uninstall")
+        self.assertEqual(len(call_args[1][1]), len(m.GUI_APP_SPECS))
 
-        reset_mock.assert_called_once()
-
-    def test_on_install_respects_auto_update_toggle_off(self) -> None:
-        class ThreadSpy:
-            instances: list["ThreadSpy"] = []
-
-            def __init__(self, target, args, daemon) -> None:
-                self.target = target
-                self.args = args
-                self.daemon = daemon
-                ThreadSpy.instances.append(self)
-
-            def start(self) -> None:
-                return None
-
-        selected_key = "codex"
+    def test_on_gui_app_action_uses_installed_state_to_pick_uninstall(self) -> None:
         dummy = types.SimpleNamespace(
             worker_thread=None,
-            checkboxes={spec.key: DummyCheckbox(spec.key == selected_key) for spec in m.CLI_SPECS},
-            auto_update_checkbox=DummyCheckbox(False),
-            log_ctrl=DummyLogCtrl(),
-            set_status=MagicMock(),
-            set_gauge=MagicMock(),
-            set_busy=MagicMock(),
-            _install_worker=MagicMock(),
+            gui_app_installed_state={"chatgpt_app": True},
+            _prepare_for_worker_run=MagicMock(return_value=True),
+            _start_worker=MagicMock(),
+            _gui_app_action_worker=MagicMock(),
         )
 
-        with patch.object(m.threading, "Thread", ThreadSpy):
-            m.InstallerFrame.on_install(dummy, None)
+        m.InstallerFrame.on_gui_app_action(dummy, "chatgpt_app")
+        call_args = dummy._start_worker.call_args.args
+        self.assertEqual(call_args[1][0], "uninstall")
+        self.assertEqual(call_args[1][1][0].key, "chatgpt_app")
 
-        self.assertFalse(ThreadSpy.instances[0].args[1])
-
-    def test_on_install_defaults_auto_update_enabled_when_toggle_missing(self) -> None:
-        class ThreadSpy:
-            instances: list["ThreadSpy"] = []
-
-            def __init__(self, target, args, daemon) -> None:
-                self.args = args
-                ThreadSpy.instances.append(self)
-
-            def start(self) -> None:
-                return None
-
-        selected_key = "codex"
+    def test_on_install_all_toggle_starts_install_for_missing_clis(self) -> None:
         dummy = types.SimpleNamespace(
             worker_thread=None,
-            checkboxes={spec.key: DummyCheckbox(spec.key == selected_key) for spec in m.CLI_SPECS},
-            log_ctrl=DummyLogCtrl(),
-            set_status=MagicMock(),
-            set_gauge=MagicMock(),
-            set_busy=MagicMock(),
-            _install_worker=MagicMock(),
+            cli_installed_state={spec.key: (spec.key == "codex") for spec in m.CLI_SPECS},
+            refresh_cli_action_buttons=MagicMock(),
+            _prepare_for_worker_run=MagicMock(return_value=True),
+            _start_worker=MagicMock(),
+            _cli_action_worker=MagicMock(),
+            _auto_update_enabled=MagicMock(return_value=True),
+        )
+        dummy._all_clis_installed = types.MethodType(m.InstallerFrame._all_clis_installed, dummy)
+
+        m.InstallerFrame.on_install_all_toggle(dummy, None)
+        call_args = dummy._start_worker.call_args.args
+        self.assertIs(call_args[0], dummy._cli_action_worker)
+        self.assertEqual(call_args[1][0], "install")
+        chosen = call_args[1][1]
+        self.assertTrue(all(spec.key != "codex" for spec in chosen))
+
+    def test_on_install_all_toggle_starts_uninstall_when_all_installed(self) -> None:
+        dummy = types.SimpleNamespace(
+            worker_thread=None,
+            cli_installed_state={spec.key: True for spec in m.CLI_SPECS},
+            refresh_cli_action_buttons=MagicMock(),
+            _prepare_for_worker_run=MagicMock(return_value=True),
+            _start_worker=MagicMock(),
+            _cli_action_worker=MagicMock(),
+            _auto_update_enabled=MagicMock(return_value=True),
+        )
+        dummy._all_clis_installed = types.MethodType(m.InstallerFrame._all_clis_installed, dummy)
+
+        m.InstallerFrame.on_install_all_toggle(dummy, None)
+        call_args = dummy._start_worker.call_args.args
+        self.assertEqual(call_args[1][0], "uninstall")
+        self.assertEqual(len(call_args[1][1]), len(m.CLI_SPECS))
+
+    def test_on_cli_action_uses_installed_state_to_pick_uninstall(self) -> None:
+        dummy = types.SimpleNamespace(
+            worker_thread=None,
+            cli_installed_state={"codex": True},
+            _prepare_for_worker_run=MagicMock(return_value=True),
+            _start_worker=MagicMock(),
+            _cli_action_worker=MagicMock(),
+            _auto_update_enabled=MagicMock(return_value=True),
+            _is_cli_installed=MagicMock(return_value=False),
         )
 
-        with patch.object(m.threading, "Thread", ThreadSpy):
-            m.InstallerFrame.on_install(dummy, None)
+        m.InstallerFrame.on_cli_action(dummy, "codex")
+        call_args = dummy._start_worker.call_args.args
+        self.assertEqual(call_args[1][0], "uninstall")
+        self.assertEqual(call_args[1][1][0].key, "codex")
 
-        self.assertTrue(ThreadSpy.instances[0].args[1])
+    def test_auto_update_enabled_defaults_true_when_toggle_missing(self) -> None:
+        dummy = types.SimpleNamespace()
+        self.assertTrue(m.InstallerFrame._auto_update_enabled(dummy))
+        dummy = types.SimpleNamespace(auto_update_checkbox=DummyCheckbox(False))
+        self.assertFalse(m.InstallerFrame._auto_update_enabled(dummy))
 
 
 class AppEntrypointTests(unittest.TestCase):

@@ -20,6 +20,14 @@ By default it can install:
 - Mistral Vibe CLI (`mistral-vibe`)
 - Ollama (official version + `ollama` CLI)
 
+From the GUI, it can also install desktop AI apps (or shortcuts), including:
+- Claude App
+- ChatGPT App
+- Codex App (Microsoft Store app via `9PLM9XGG6VKS`)
+- Gemini App
+- Microsoft Copilot App
+- Perplexity App
+
 ## What It Changes On Your System
 
 It does real system changes. Here they are.
@@ -41,6 +49,11 @@ Auto-update jobs:
 
 Run the built EXE:
 - `dist\InstallTheCli.exe`
+
+Run the Python GUI directly from terminal:
+- `.\run_gui.ps1` (PowerShell)
+- `run_gui.cmd` (cmd/PowerShell)
+- or `py -3.14 .\ai_cli_installer_gui.py`
 
 What it does:
 - installs selected CLIs
